@@ -293,11 +293,14 @@ class PaperApp:
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
                     state.snapshot_received_at_ms = received_at_ms
                 wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
+                completed_footprints: list[dict[str, Any]] = []
                 if self.footprint is not None:
-                    self.footprint.process(wrapped)
+                    completed_footprints = self.footprint.process(wrapped)
                 if self.dom is not None:
                     state.last_dom_events = self.dom.process(wrapped)[-20:]
                 self.executor.on_quote(symbol, self._quote(state, received_at_ms))
+                for footprint in completed_footprints:
+                    self._complete_footprint(footprint, received_at_ms)
             except (TypeError, ValueError) as exc:
                 self.executor.cancel_pending(str(exc), received_at_ms)
                 self.journal.event(received_at_ms, "WARN", "BOOK", str(exc), {"symbol": symbol})

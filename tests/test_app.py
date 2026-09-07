@@ -1,9 +1,11 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from sniper_paper.app import PaperApp, SymbolState, _parse_klines
 from sniper_paper.market import Bar, Trade
+from sniper_paper.orderflow import Footprint
 from sniper_paper.storage import Journal
 from sniper_paper.strategy import Level, LevelSide
 
@@ -90,3 +92,34 @@ def test_market_detail_readiness_requires_every_gate(tmp_path: Path, monkeypatch
     blocked = app.market_detail("XUSDT", "5m")["readiness"]
     assert blocked["ready"] is False
     assert blocked["blocker"] == "orderflow_incomplete"
+
+
+def test_orderbook_message_does_not_drop_completed_footprint(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT", tick_size=0.01)
+    app.states = {"XUSDT": state}
+    app.connection_id = "c1"
+    app.footprint = Footprint({"XUSDT": "0.01"}, warmup_ms=1)
+
+    asyncio.run(
+        app.handle_message(
+            {
+                "topic": "publicTrade.XUSDT",
+                "data": [{"s": "XUSDT", "i": "t1", "p": "100.00", "v": "1", "S": "Buy"}],
+            },
+            1_000,
+        )
+    )
+    asyncio.run(
+        app.handle_message(
+            {
+                "topic": "orderbook.50.XUSDT",
+                "type": "snapshot",
+                "data": {"s": "XUSDT", "u": 1, "seq": 1, "b": [["99.99", "2"]], "a": [["100.01", "3"]]},
+            },
+            15_001,
+        )
+    )
+
+    assert len(state.bars["15s"]) == 1
+    assert state.bars["15s"][0].close == 100.0
