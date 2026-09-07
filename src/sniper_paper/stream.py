@@ -9,6 +9,8 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 
 PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
+PUBLIC_APP_PING_INTERVAL_S = 20.0
+PUBLIC_APP_PING_TIMEOUT_S = 10.0
 MessageHandler = Callable[[dict, int], Awaitable[None]]
 
 
@@ -21,6 +23,21 @@ def public_topics(symbols: Sequence[str]) -> list[str]:
     if not result:
         raise ValueError("at least one symbol is required")
     return result
+
+
+def _now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def _is_pong(message: dict) -> bool:
+    return message.get("op") == "pong" or message.get("ret_msg") == "pong"
+
+
+def _parse_message(raw: str | bytes) -> dict:
+    message = json.loads(raw)
+    if not isinstance(message, dict):
+        raise TypeError("public stream payload must be an object")
+    return message
 
 
 async def run_public_stream(
@@ -38,16 +55,31 @@ async def run_public_stream(
     attempt = 0
     while not stop.is_set():
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10, max_size=8_000_000) as socket:
+            async with websockets.connect(url, ping_interval=None, ping_timeout=None, max_size=8_000_000) as socket:
                 await socket.send(json.dumps({"op": "subscribe", "args": topics}))
-                await handler({"op": "connection", "state": "connected"}, time.time_ns() // 1_000_000)
+                await handler(
+                    {"op": "connection", "state": "connected", "ready": True, "gap": False},
+                    _now_ms(),
+                )
                 attempt = 0
+                last_activity_ms = _now_ms()
                 while not stop.is_set():
-                    raw = await socket.recv()
-                    received_at_ms = time.time_ns() // 1_000_000
-                    message = json.loads(raw)
-                    if not isinstance(message, dict):
-                        raise TypeError("public stream payload must be an object")
+                    idle_timeout = PUBLIC_APP_PING_INTERVAL_S - ((_now_ms() - last_activity_ms) / 1000.0)
+                    if idle_timeout <= 0:
+                        idle_timeout = 0.1
+                    try:
+                        raw = await asyncio.wait_for(socket.recv(), timeout=idle_timeout)
+                    except TimeoutError:
+                        await socket.send(json.dumps({"op": "ping"}))
+                        try:
+                            raw = await asyncio.wait_for(socket.recv(), timeout=PUBLIC_APP_PING_TIMEOUT_S)
+                        except TimeoutError as exc:
+                            raise TimeoutError("application ping timed out") from exc
+                    received_at_ms = _now_ms()
+                    message = _parse_message(raw)
+                    last_activity_ms = received_at_ms
+                    if _is_pong(message):
+                        continue
                     await handler(message, received_at_ms)
         except asyncio.CancelledError:
             raise
@@ -55,7 +87,7 @@ async def run_public_stream(
             with contextlib.suppress(Exception):
                 await handler(
                     {"op": "connection", "state": "disconnected", "error": str(exc)},
-                    time.time_ns() // 1_000_000,
+                    _now_ms(),
                 )
             delay = min(2**attempt, 15)
             attempt += 1

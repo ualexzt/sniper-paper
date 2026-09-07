@@ -25,6 +25,18 @@ def _decimal_to_json(value: Decimal | None) -> str | None:
     return format(value, "f")
 
 
+def _required_positive_decimal(source: Mapping[str, Any] | None, key: str) -> tuple[Decimal | None, str | None]:
+    if not isinstance(source, Mapping):
+        return None, f"missing_{key}"
+    raw = source.get(key)
+    if raw is None or raw == "":
+        return None, f"missing_{key}"
+    parsed = _decimal(raw)
+    if parsed is None or parsed <= 0:
+        return None, f"invalid_{key}"
+    return parsed, None
+
+
 def _rank_scores(values: list[tuple[str, Decimal]], *, descending: bool) -> dict[str, Decimal]:
     if not values:
         return {}
@@ -51,6 +63,9 @@ class UniverseExclusion:
     abs_price24h_pcnt: Decimal | None = None
     spread_bps: Decimal | None = None
     depth_notional_top5: Decimal | None = None
+    tick_size: Decimal | None = None
+    qty_step: Decimal | None = None
+    min_order_qty: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +76,9 @@ class UniverseExclusion:
             "abs_price24h_pcnt": _decimal_to_json(self.abs_price24h_pcnt),
             "spread_bps": _decimal_to_json(self.spread_bps),
             "depth_notional_top5": _decimal_to_json(self.depth_notional_top5),
+            "tick_size": _decimal_to_json(self.tick_size),
+            "qty_step": _decimal_to_json(self.qty_step),
+            "min_order_qty": _decimal_to_json(self.min_order_qty),
         }
 
 
@@ -74,6 +92,9 @@ class UniverseSelection:
     abs_price24h_pcnt: Decimal
     spread_bps: Decimal
     depth_notional_top5: Decimal
+    tick_size: Decimal
+    qty_step: Decimal
+    min_order_qty: Decimal
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +106,9 @@ class UniverseSelection:
             "abs_price24h_pcnt": _decimal_to_json(self.abs_price24h_pcnt),
             "spread_bps": _decimal_to_json(self.spread_bps),
             "depth_notional_top5": _decimal_to_json(self.depth_notional_top5),
+            "tick_size": _decimal_to_json(self.tick_size),
+            "qty_step": _decimal_to_json(self.qty_step),
+            "min_order_qty": _decimal_to_json(self.min_order_qty),
         }
 
 
@@ -157,6 +181,20 @@ class DailyUniverseSelector:
         for instrument in instruments:
             symbol = str(instrument.get("symbol", ""))
             reasons: list[str] = []
+            price_filter = instrument.get("priceFilter") if isinstance(instrument, dict) else None
+            lot_size_filter = instrument.get("lotSizeFilter") if isinstance(instrument, dict) else None
+            tick_size, tick_reason = _required_positive_decimal(
+                price_filter if isinstance(price_filter, Mapping) else None,
+                "tickSize",
+            )
+            qty_step, qty_step_reason = _required_positive_decimal(
+                lot_size_filter if isinstance(lot_size_filter, Mapping) else None,
+                "qtyStep",
+            )
+            min_order_qty, min_order_qty_reason = _required_positive_decimal(
+                lot_size_filter if isinstance(lot_size_filter, Mapping) else None,
+                "minOrderQty",
+            )
             if instrument.get("contractType") != "LinearPerpetual":
                 reasons.append("not_linear_perpetual")
             if instrument.get("quoteCoin") != "USDT":
@@ -167,6 +205,12 @@ class DailyUniverseSelector:
                 reasons.append("not_trading")
             if instrument.get("isPreListing") is True:
                 reasons.append("prelisting")
+            if tick_reason:
+                reasons.append(tick_reason)
+            if qty_step_reason:
+                reasons.append(qty_step_reason)
+            if min_order_qty_reason:
+                reasons.append(min_order_qty_reason)
 
             ticker = tickers.get(symbol)
             if ticker is None:
@@ -193,6 +237,9 @@ class DailyUniverseSelector:
                         turnover24h=turnover,
                         volume24h=volume,
                         abs_price24h_pcnt=abs_move,
+                        tick_size=tick_size,
+                        qty_step=qty_step,
+                        min_order_qty=min_order_qty,
                     )
                 )
                 continue
@@ -203,6 +250,9 @@ class DailyUniverseSelector:
                     "turnover24h": turnover,
                     "volume24h": volume,
                     "abs_price24h_pcnt": abs_move,
+                    "tick_size": tick_size,
+                    "qty_step": qty_step,
+                    "min_order_qty": min_order_qty,
                 }
             )
 
@@ -259,6 +309,9 @@ class DailyUniverseSelector:
                         abs_price24h_pcnt=item["abs_price24h_pcnt"],
                         spread_bps=spread_bps,
                         depth_notional_top5=depth_notional_top5,
+                        tick_size=item["tick_size"],
+                        qty_step=item["qty_step"],
+                        min_order_qty=item["min_order_qty"],
                     )
                 )
             else:
@@ -271,6 +324,9 @@ class DailyUniverseSelector:
                     turnover24h=item["turnover24h"],
                     volume24h=item["volume24h"],
                     abs_price24h_pcnt=item["abs_price24h_pcnt"],
+                    tick_size=item["tick_size"],
+                    qty_step=item["qty_step"],
+                    min_order_qty=item["min_order_qty"],
                 )
             )
 
@@ -320,6 +376,9 @@ class DailyUniverseSelector:
                     abs_price24h_pcnt=item["abs_price24h_pcnt"],
                     spread_bps=item["spread_bps"],
                     depth_notional_top5=item["depth_notional_top5"],
+                    tick_size=item["tick_size"],
+                    qty_step=item["qty_step"],
+                    min_order_qty=item["min_order_qty"],
                 )
             )
 
@@ -333,6 +392,9 @@ class DailyUniverseSelector:
                     abs_price24h_pcnt=item["abs_price24h_pcnt"],
                     spread_bps=item["spread_bps"],
                     depth_notional_top5=item["depth_notional_top5"],
+                    tick_size=item["tick_size"],
+                    qty_step=item["qty_step"],
+                    min_order_qty=item["min_order_qty"],
                 )
             )
 

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Journal:
@@ -93,6 +93,27 @@ class Journal:
                     gross_pnl REAL,
                     net_pnl REAL
                 );
+                CREATE TABLE IF NOT EXISTS paper_orders (
+                    order_id TEXT PRIMARY KEY,
+                    signal_id TEXT NOT NULL UNIQUE REFERENCES signals(signal_id),
+                    created_at_ms INTEGER NOT NULL,
+                    activated_at_ms INTEGER,
+                    missed_at_ms INTEGER,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK(side IN ('LONG', 'SHORT')),
+                    lane TEXT NOT NULL,
+                    entry_price REAL,
+                    quantity REAL NOT NULL DEFAULT 0,
+                    filled_qty REAL NOT NULL DEFAULT 0,
+                    queue_ahead_qty REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL CHECK(status IN ('PENDING', 'ACTIVE', 'PARTIAL', 'FILLED', 'MISSED', 'CANCELLED')),
+                    miss_reason TEXT,
+                    last_quote_received_at_ms INTEGER,
+                    last_bid REAL,
+                    last_ask REAL,
+                    last_bid_size REAL,
+                    last_ask_size REAL
+                );
                 CREATE TABLE IF NOT EXISTS service_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     occurred_at_ms INTEGER NOT NULL,
@@ -120,6 +141,8 @@ class Journal:
                     ON signals(occurred_at_ms DESC);
                 CREATE INDEX IF NOT EXISTS idx_positions_status
                     ON positions(status, opened_at_ms DESC);
+                CREATE INDEX IF NOT EXISTS idx_paper_orders_status
+                    ON paper_orders(status, created_at_ms DESC);
                 CREATE INDEX IF NOT EXISTS idx_service_events_time
                     ON service_events(occurred_at_ms DESC);
                 """
@@ -214,6 +237,75 @@ class Journal:
                 f"INSERT INTO positions ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
                 [position[field] for field in fields],
             )
+
+    def update_open_position(self, position_id: str, *, quantity: float, entry_price: float, entry_fee: float) -> None:
+        with self.connect() as db:
+            cursor = db.execute(
+                """UPDATE positions SET quantity=?, entry_price=?, entry_fee=?
+                   WHERE position_id=? AND status='OPEN'""",
+                (quantity, entry_price, entry_fee, position_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"position is not open: {position_id}")
+
+    def record_paper_order(self, order: Mapping[str, Any]) -> None:
+        fields = (
+            "order_id",
+            "signal_id",
+            "created_at_ms",
+            "activated_at_ms",
+            "missed_at_ms",
+            "symbol",
+            "side",
+            "lane",
+            "entry_price",
+            "quantity",
+            "filled_qty",
+            "queue_ahead_qty",
+            "status",
+            "miss_reason",
+            "last_quote_received_at_ms",
+            "last_bid",
+            "last_ask",
+            "last_bid_size",
+            "last_ask_size",
+        )
+        with self.connect() as db:
+            db.execute(
+                f"INSERT INTO paper_orders ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
+                [order.get(field) for field in fields],
+            )
+
+    def update_paper_order(self, order_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        allowed = {
+            "activated_at_ms",
+            "missed_at_ms",
+            "entry_price",
+            "quantity",
+            "filled_qty",
+            "queue_ahead_qty",
+            "status",
+            "miss_reason",
+            "last_quote_received_at_ms",
+            "last_bid",
+            "last_ask",
+            "last_bid_size",
+            "last_ask_size",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unsupported paper order fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        values = list(fields.values()) + [order_id]
+        with self.connect() as db:
+            cursor = db.execute(
+                f"UPDATE paper_orders SET {assignments} WHERE order_id=?",
+                values,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"unknown paper order: {order_id}")
 
     def update_excursion(self, position_id: str, mfe_bp: float, mae_bp: float) -> None:
         with self.connect() as db:
@@ -387,16 +479,45 @@ class Journal:
                 attempts.add((str(level_id), str(row["lane"])))
         return attempts
 
+    def attempted_setup_ids(self) -> set[str]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT features_json FROM signals WHERE status IN ('TRIGGERED','OPEN','CLOSED','MISSED')"
+            ).fetchall()
+        result: set[str] = set()
+        for row in rows:
+            setup_id = json.loads(row["features_json"]).get("setup_id")
+            if setup_id:
+                result.add(str(setup_id))
+        return result
+
     def reconcile_orphaned_triggers(self, reason: str = "restart_before_paper_entry") -> int:
         """Mark memory-only pending attempts as missed after a restart."""
         with self.connect() as db:
             cursor = db.execute(
                 """UPDATE signals SET status='MISSED', reason=?
                    WHERE status='TRIGGERED'
-                     AND signal_id NOT IN (SELECT signal_id FROM positions)""",
+                     AND signal_id NOT IN (SELECT signal_id FROM positions)
+                     AND signal_id NOT IN (
+                         SELECT signal_id FROM paper_orders
+                         WHERE status IN ('PENDING', 'ACTIVE', 'PARTIAL')
+                     )""",
                 (reason,),
             )
         return cursor.rowcount
+
+    def paper_order_row(self, signal_id: str | None = None) -> dict[str, Any] | None:
+        with self.connect() as db:
+            if signal_id is None:
+                row = db.execute(
+                    """SELECT * FROM paper_orders
+                       WHERE status IN ('PENDING', 'ACTIVE', 'PARTIAL')
+                       ORDER BY created_at_ms DESC
+                       LIMIT 1"""
+                ).fetchone()
+            else:
+                row = db.execute("SELECT * FROM paper_orders WHERE signal_id=?", (signal_id,)).fetchone()
+        return dict(row) if row else None
 
     def signal_row(self, signal_id: str) -> dict[str, Any] | None:
         with self.connect() as db:

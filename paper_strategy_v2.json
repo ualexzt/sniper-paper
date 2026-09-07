@@ -1,0 +1,165 @@
+{
+  "name": "paper_strategy_v2",
+  "version": "v2",
+  "status": "frozen_spec",
+  "safety_boundary": {
+    "public_market_data_only": true,
+    "separate_server_and_repository": true,
+    "api_keys_allowed": false,
+    "authenticated_orders_allowed": false,
+    "paper_only": true,
+    "simulated_fills_only": true
+  },
+  "universe_policy": {
+    "cadence": "once_daily",
+    "timezone": "UTC",
+    "anchor_time_utc": "00:00:00Z",
+    "retroactive_additions_allowed": false
+  },
+  "market_data_policy": {
+    "required_timeframes": ["15s", "1m", "5m", "15m", "4h"],
+    "sources": ["orderbook", "trades"]
+  },
+  "execution_policy": {
+    "mode": "paper",
+    "one_attempt_per_setup": true,
+    "deterministic_take_profit": true,
+    "deterministic_stop_loss": true,
+    "include_fees": true,
+    "include_latency": true,
+    "entry_latency_ms": 250,
+    "entry_ttl_ms": 2000,
+    "confirmation_timeout_ms": 30000,
+    "cooldown_ms": 60000
+  },
+  "parameters": {
+    "universe": {
+      "max_symbols": 10,
+      "candidate_pool_multiplier": 4,
+      "max_spread_bps": 2.0,
+      "min_depth_notional_top5": 1000.0
+    },
+    "data_quality": {
+      "orderbook_depth": 50,
+      "max_book_age_ms": 500,
+      "warmup_minutes_after_snapshot": 5
+    },
+    "strategy": {
+      "tick_size": 0.01,
+      "trend_lookback_4h": 6,
+      "min_trend_move_pct": 5.0,
+      "consolidation_bars_5m": 6,
+      "max_consolidation_width_bp": 250.0,
+      "trigger_lookback_1m": 3,
+      "min_book_imbalance": 0.05,
+      "min_reward_risk": 1.5,
+      "terminal_reward_risk": 2.0,
+      "stop_buffer_bp": 5.0,
+      "sweep_delta_multiplier": 2.0,
+      "sweep_range_multiplier": 0.5,
+      "min_risk_bp": 10.0,
+      "max_risk_bp": 50.0,
+      "budget_cost_bp": 9.5,
+      "structure_reclaim_bp": 1.0,
+      "cascade_min_body_to_range": 0.6,
+      "cascade_min_delta_ratio": 2.0,
+      "fresh_extreme_lookback_4h": 6
+    },
+    "paper": {
+      "initial_equity": 10000.0,
+      "risk_fraction": 0.001,
+      "daily_loss_fraction": 0.01,
+      "maker_fee_rate": 0.0002,
+      "taker_fee_rate": 0.00055,
+      "slippage_bp": 2.0,
+      "latency_ms": 250
+    }
+  },
+  "lanes": [
+    {
+      "name": "failed_sweep_reclaim",
+      "role": "primary",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 30000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "early_target_hunt",
+      "role": "preparation",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 30000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "terminal_level_breakout",
+      "role": "execution",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 2000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "target_seeking_breakout",
+      "role": "execution",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 30000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "structural_reaction",
+      "role": "reaction",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 2000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "cascade_impulse",
+      "role": "execution",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 2000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "fresh_extreme_momentum",
+      "role": "execution",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "diagnostic": false,
+      "confirmation_timeout_ms": 2000,
+      "cooldown_ms": 60000
+    },
+    {
+      "name": "dom_confirmed_breakout",
+      "role": "diagnostic",
+      "direction": "both",
+      "attempts_per_setup": 0,
+      "diagnostic": true,
+      "default_status": "REJECTED"
+    },
+    {
+      "name": "diagonal_context",
+      "role": "diagnostic",
+      "direction": "both",
+      "attempts_per_setup": 0,
+      "diagnostic": true,
+      "default_status": "REJECTED"
+    }
+  ],
+  "unvalidated_hypotheses": [
+    "early_target_hunt arms on trend plus consolidation and defers execution to target_seeking_breakout.",
+    "target_seeking_breakout is the executable breakout continuation for the same consolidation context.",
+    "structural_reaction, cascade_impulse, and fresh_extreme_momentum are conservative v2-only hypotheses that still obey one-attempt and causal expiry rules.",
+    "dom_confirmed_breakout and diagonal_context are diagnostic and must never emit tradable signals."
+  ]
+}

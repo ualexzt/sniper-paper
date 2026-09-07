@@ -26,45 +26,79 @@ def signal_row(signal: PaperSignal) -> dict:
     }
 
 
-def test_long_opens_after_latency_and_closes_at_tp(tmp_path: Path) -> None:
+def quote(ts: int, bid: float = 100.0, ask: float = 100.1, bid_size: float = 5.0, ask_size: float = 6.0) -> Quote:
+    return Quote(ts, bid, ask, bid_size, ask_size, {bid: bid_size}, {ask: ask_size})
+
+
+def test_strict_queue_entry_then_tp(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
-    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "early_target_hunt", 99, 103)
+    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "failed_sweep_reclaim", 99, 103)
     journal.record_signal(signal_row(signal))
-    executor = PaperExecutor(journal, slippage_bp=0, latency_ms=250)
-    assert executor.submit(signal)
-    assert executor.on_quote("BTCUSDT", Quote(1_249, 100, 100.1)) is None
-    opened = executor.on_quote("BTCUSDT", Quote(1_250, 100, 100.1))
+    executor = PaperExecutor(journal, slippage_bp=0, latency_ms=250, maker_fee_rate=0)
+    assert executor.submit(signal, quote(1_000))
+    assert executor.on_quote("BTCUSDT", quote(1_249)) is None
+    assert executor.on_quote("BTCUSDT", quote(1_250))["event"] == "ACTIVE"
+    queued = executor.on_trade("BTCUSDT", 1_300, "Sell", 100.0, 5.0)
+    assert queued == {"event": "QUEUE", "queue_consumed": 5.0, "filled_qty": 0.0}
+    opened = executor.on_trade("BTCUSDT", 1_301, "Sell", 100.0, 20.0)
     assert opened and opened["event"] == "OPEN"
-    assert executor.on_quote("BTCUSDT", Quote(1_300, 103, 103.1))["exit_reason"] == "TP"
-    snapshot = journal.dashboard_snapshot()
-    assert snapshot["positions"] == []
-    assert snapshot["lane_pnl"][0]["trades"] == 1
-    assert snapshot["lane_pnl"][0]["net_pnl"] > 0
+    closed = executor.on_quote("BTCUSDT", quote(1_400, 103, 103.1))
+    assert closed and closed["exit_reason"] == "TP"
+    assert journal.dashboard_snapshot()["lane_pnl"][0]["net_pnl"] > 0
 
 
-def test_short_stop_and_single_position_gate(tmp_path: Path) -> None:
+def test_cancellations_do_not_improve_queue_and_partial_fill_restores(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "failed_sweep_reclaim", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, slippage_bp=0, latency_ms=0, maker_fee_rate=0)
+    assert executor.submit(signal, quote(1_000, bid_size=5))
+    executor.on_quote("BTCUSDT", quote(1_000, bid_size=5))
+    executor.on_quote("BTCUSDT", quote(1_050, bid_size=2))
+    assert executor.pending and executor.pending.queue_ahead_qty == 5
+    executor.on_trade("BTCUSDT", 1_100, "Sell", 100, 6)
+    assert executor.position and executor.position.quantity == pytest.approx(1)
+    assert executor.pending and executor.pending.status == "PARTIAL"
+
+    restored = PaperExecutor(journal, slippage_bp=0, latency_ms=0, maker_fee_rate=0)
+    assert restored.restore()
+    assert restored.position and restored.position.quantity == pytest.approx(1)
+    assert restored.pending and restored.pending.filled_qty == pytest.approx(1)
+    restored.on_trade("BTCUSDT", 1_200, "Sell", 100, 100)
+    assert restored.pending is None
+
+
+def test_no_touch_expires_as_missed(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "failed_sweep_reclaim", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=100, entry_ttl_ms=2_000)
+    assert executor.submit(signal, quote(1_000))
+    executor.on_quote("BTCUSDT", quote(1_100))
+    result = executor.on_quote("BTCUSDT", quote(3_100))
+    assert result and result["event"] == "MISSED"
+    assert executor.position is None and executor.pending is None
+    assert journal.signal_row("s1")["status"] == "MISSED"
+
+
+def test_wrong_trade_side_or_price_never_fills(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
     signal = PaperSignal("s1", 0, "ETHUSDT", Side.SHORT, "terminal_level_breakout", 102, 96)
     journal.record_signal(signal_row(signal))
-    executor = PaperExecutor(journal, slippage_bp=0, latency_ms=0)
-    assert executor.submit(signal)
-    assert not executor.submit(signal)
-    executor.on_quote("ETHUSDT", Quote(1, 99.9, 100))
-    result = executor.on_quote("ETHUSDT", Quote(2, 102, 102.1))
-    assert result and result["exit_reason"] == "SL"
-    assert result["net_pnl"] < 0
+    executor = PaperExecutor(journal, latency_ms=0)
+    assert executor.submit(signal, quote(0))
+    executor.on_quote("ETHUSDT", quote(0))
+    assert executor.on_trade("ETHUSDT", 1, "Sell", 100.1, 100) is None
+    assert executor.on_trade("ETHUSDT", 2, "Buy", 100.0, 100) is None
+    assert executor.position is None
 
 
-def test_duplicate_signal_and_double_close_are_rejected(tmp_path: Path) -> None:
+def test_duplicate_signal_and_universe_day_are_rejected(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
     signal = PaperSignal("s1", 0, "BTCUSDT", Side.LONG, "early_target_hunt", 99, 102)
     journal.record_signal(signal_row(signal))
     with pytest.raises(sqlite3.IntegrityError):
         journal.record_signal(signal_row(signal))
-
-
-def test_universe_snapshot_is_immutable_per_utc_day(tmp_path: Path) -> None:
-    journal = Journal(tmp_path / "paper.db")
     kwargs = {
         "run_id": "r1",
         "selected_at_ms": 1,
@@ -76,28 +110,32 @@ def test_universe_snapshot_is_immutable_per_utc_day(tmp_path: Path) -> None:
     journal.record_universe(**kwargs)
     with pytest.raises(sqlite3.IntegrityError):
         journal.record_universe(**{**kwargs, "run_id": "r2"})
-    run = journal.universe_run_for_date("2026-09-07")
-    assert run is not None
-    assert run["source"] == {"endpoint": "public"}
 
 
-def test_open_position_restores_after_restart(tmp_path: Path) -> None:
+def test_partial_ttl_keeps_real_position_and_cancels_remainder(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
-    signal = PaperSignal("s1", 0, "BTCUSDT", Side.LONG, "early_target_hunt", 99, 102)
+    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "failed_sweep_reclaim", 99, 103)
     journal.record_signal(signal_row(signal))
-    first = PaperExecutor(journal, slippage_bp=0, latency_ms=0)
-    first.submit(signal)
-    first.on_quote("BTCUSDT", Quote(1, 100, 100.1))
-    restored = PaperExecutor(journal, slippage_bp=0, latency_ms=0)
+    executor = PaperExecutor(journal, latency_ms=0, entry_ttl_ms=100)
+    executor.submit(signal, quote(1_000, bid_size=1))
+    executor.on_quote("BTCUSDT", quote(1_000, bid_size=1))
+    executor.on_trade("BTCUSDT", 1_050, "Sell", 100, 2)
+    assert executor.position is not None
+    result = executor.on_quote("BTCUSDT", quote(1_100))
+    assert result and result["event"] == "PARTIAL_EXPIRED"
+    assert executor.position is not None and executor.pending is None
+    assert journal.signal_row("s1")["status"] == "OPEN"
+
+
+def test_restart_reconcile_preserves_persisted_pending_order(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    signal = PaperSignal("s1", 1_000, "BTCUSDT", Side.LONG, "failed_sweep_reclaim", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=250)
+    assert executor.submit(signal, quote(1_000))
+
+    assert journal.reconcile_orphaned_triggers() == 0
+    restored = PaperExecutor(journal, latency_ms=250)
     assert restored.restore()
-    assert restored.position is not None
-    assert restored.position.signal.signal_id == "s1"
-    assert restored.on_quote("BTCUSDT", Quote(2, 102, 102.1))["exit_reason"] == "TP"
-
-
-def test_restart_marks_memory_only_trigger_as_missed(tmp_path: Path) -> None:
-    journal = Journal(tmp_path / "paper.db")
-    signal = PaperSignal("s1", 0, "BTCUSDT", Side.LONG, "early_target_hunt", 99, 102)
-    journal.record_signal(signal_row(signal))
-    assert journal.reconcile_orphaned_triggers() == 1
-    assert journal.signal_row("s1")["status"] == "MISSED"
+    assert restored.pending and restored.pending.signal.signal_id == "s1"
+    assert journal.signal_row("s1")["status"] == "TRIGGERED"

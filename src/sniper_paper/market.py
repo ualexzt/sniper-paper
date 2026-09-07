@@ -177,3 +177,79 @@ class BarBuilder:
             delta_notional=sum(trade.signed_notional for trade in trades),
             trades=len(trades),
         )
+
+
+@dataclass(frozen=True)
+class FeedReadiness:
+    connection_id: str | None
+    received_at_ms: int | None
+    gap_ms: int | None
+    quarantined_until_ms: int | None
+    quarantine_reason: str | None
+    connected: bool
+    gap_detected: bool
+    ready: bool
+
+
+class FeedClock:
+    """Deterministic connection and gap readiness for public-feed consumers."""
+
+    def __init__(self, gap_ms: int = 5_000, warmup_ms: int = 300_000) -> None:
+        if gap_ms <= 0 or warmup_ms < 0:
+            raise ValueError("gap_ms must be positive and warmup_ms must be non-negative")
+        self.gap_ms = gap_ms
+        self.warmup_ms = warmup_ms
+        self.connection_id: str | None = None
+        self.last_received_at_ms: int | None = None
+        self.quarantined_until_ms: int | None = None
+        self.quarantine_reason: str | None = None
+        self._disconnected = False
+
+    def disconnect(self, received_at_ms: int) -> FeedReadiness:
+        if not isinstance(received_at_ms, int):
+            raise TypeError("received_at_ms must be an integer")
+        self._disconnected = True
+        self.quarantined_until_ms = received_at_ms + self.warmup_ms
+        self.quarantine_reason = "disconnect_warmup"
+        self.last_received_at_ms = received_at_ms
+        return FeedReadiness(
+            connection_id=self.connection_id,
+            received_at_ms=received_at_ms,
+            gap_ms=None,
+            quarantined_until_ms=self.quarantined_until_ms,
+            quarantine_reason=self.quarantine_reason,
+            connected=False,
+            gap_detected=False,
+            ready=False,
+        )
+
+    def observe(self, connection_id: str, received_at_ms: int, *, snapshot: bool = False) -> FeedReadiness:
+        if not isinstance(connection_id, str) or not connection_id:
+            raise ValueError("connection_id is required")
+        if not isinstance(received_at_ms, int):
+            raise TypeError("received_at_ms must be an integer")
+        gap_ms = None if self.last_received_at_ms is None else received_at_ms - self.last_received_at_ms
+        reconnect = self._disconnected or (self.connection_id is not None and connection_id != self.connection_id)
+        gap_detected = gap_ms is not None and gap_ms > self.gap_ms
+        if reconnect or gap_detected or snapshot:
+            self.quarantined_until_ms = received_at_ms + self.warmup_ms
+            if reconnect:
+                self.quarantine_reason = "reconnect_warmup"
+            elif gap_detected:
+                self.quarantine_reason = "received_gap_warmup"
+            else:
+                self.quarantine_reason = "snapshot_warmup"
+        self._disconnected = False
+        self.connection_id = connection_id
+        self.last_received_at_ms = received_at_ms
+        ready = self.quarantined_until_ms is None or received_at_ms >= self.quarantined_until_ms
+        return FeedReadiness(
+            connection_id=self.connection_id,
+            received_at_ms=received_at_ms,
+            gap_ms=gap_ms,
+            quarantined_until_ms=None if ready else self.quarantined_until_ms,
+            quarantine_reason=None if ready else self.quarantine_reason,
+            connected=True,
+            gap_detected=gap_detected,
+            ready=ready,
+        )

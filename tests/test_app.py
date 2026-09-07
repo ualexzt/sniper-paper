@@ -63,3 +63,30 @@ def test_market_detail_appends_forming_bar_for_dashboard_only(tmp_path: Path, mo
     assert result["bar_closes_at_ms"] == 120_000
     assert result["server_time_ms"] == 65_000
     assert len(state.bars["1m"]) == 1
+
+
+def test_market_detail_readiness_requires_every_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    state.book.apply(
+        {
+            "type": "snapshot",
+            "data": {"s": "XUSDT", "u": 1, "seq": 1, "b": [["100", "2"]], "a": [["100.01", "3"]]},
+        },
+        1_000_000,
+    )
+    state.snapshot_received_at_ms = 600_000
+    state.orderflow_ready = True
+    app.states = {"XUSDT": state}
+    app.stream_connected = True
+    app.evaluation_eligible = True
+    monkeypatch.setattr("sniper_paper.app._now_ms", lambda: 1_000_000)
+
+    ready = app.market_detail("XUSDT", "5m")["readiness"]
+    assert ready["ready"] is True
+    assert ready["blocker"] is None
+
+    state.orderflow_ready = False
+    blocked = app.market_detail("XUSDT", "5m")["readiness"]
+    assert blocked["ready"] is False
+    assert blocked["blocker"] == "orderflow_incomplete"

@@ -3,43 +3,70 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from .bybit_public import BybitPublicClient
 from .market import Bar, BarBuilder, Book, Trade
+from .orderflow import DomTracker, Footprint
 from .paper import PaperExecutor, Quote
-from .protocol import load_protocol, protocol_sha256
 from .storage import Journal
 from .strategy import (
     CausalLevelEngine,
     Level,
-    StrategyDecision,
-    StrategyEvaluator,
     current_display_levels,
     previous_utc_day_levels,
+)
+from .strategy_v2 import (
+    Level as V2Level,
+)
+from .strategy_v2 import (
+    LevelSide as V2LevelSide,
+)
+from .strategy_v2 import (
+    OrderflowFrame,
+    StrategyV2Evaluator,
+)
+from .strategy_v2 import (
+    StrategyDecision as StrategyDecisionV2,
 )
 from .stream import run_public_stream
 from .universe import DailyUniverseSelector
 from .web import start_dashboard
 
-TIMEFRAMES = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "4h": 14_400_000}
+TIMEFRAMES = {"15s": 15_000, "1m": 60_000, "5m": 300_000, "15m": 900_000, "4h": 14_400_000}
 BYBIT_INTERVALS = {"1m": "1", "5m": "5", "15m": "15", "4h": "240"}
+_REPO_V2_PROTOCOL = Path(__file__).resolve().parents[2] / "paper_strategy_v2.json"
+_CWD_V2_PROTOCOL = Path.cwd() / "paper_strategy_v2.json"
+V2_PROTOCOL_PATH = _REPO_V2_PROTOCOL if _REPO_V2_PROTOCOL.exists() else _CWD_V2_PROTOCOL
 
 
 @dataclass
 class SymbolState:
     symbol: str
+    tick_size: float = 0.01
+    qty_step: float = 0.0
+    min_order_qty: float = 0.0
     book: Book = field(init=False)
     bars: dict[str, list[Bar]] = field(default_factory=lambda: {name: [] for name in TIMEFRAMES})
     builders: dict[str, BarBuilder] = field(init=False)
     level_engines: dict[str, CausalLevelEngine] = field(init=False)
     levels: list[Level] = field(default_factory=list)
     snapshot_received_at_ms: int | None = None
+    last_orderflow: dict[str, Any] | None = None
+    last_dom_events: list[dict[str, Any]] = field(default_factory=list)
+    last_blocker: str | None = None
+    orderflow_ready: bool = False
+    recorded_decisions: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.book = Book(self.symbol)
@@ -52,9 +79,9 @@ class PaperApp:
         self.journal = journal
         self.client = client or BybitPublicClient()
         orphaned = self.journal.reconcile_orphaned_triggers()
-        self.protocol = load_protocol()
-        self.protocol_hash = protocol_sha256()
-        params = self.protocol.parameters
+        self.protocol_data = json.loads(V2_PROTOCOL_PATH.read_text(encoding="utf-8"))
+        self.protocol_hash = hashlib.sha256(V2_PROTOCOL_PATH.read_bytes()).hexdigest()
+        params = self.protocol_data["parameters"]
         self.selector = DailyUniverseSelector(
             self.client,
             max_symbols=int(params["universe"]["max_symbols"]),
@@ -62,21 +89,27 @@ class PaperApp:
             max_spread_bps=str(params["universe"]["max_spread_bps"]),
             min_depth_notional_top5=str(params["universe"]["min_depth_notional_top5"]),
         )
-        self.strategy = StrategyEvaluator(**params["strategy"])
-        self.strategy.restore_attempts(self.journal.attempted_level_lanes())
+        self.strategies: dict[str, StrategyV2Evaluator] = {}
+        self.restored_setup_ids = self.journal.attempted_setup_ids()
         self.executor = PaperExecutor(
             journal,
             equity=float(params["paper"]["initial_equity"]),
             risk_fraction=float(params["paper"]["risk_fraction"]),
             daily_loss_fraction=float(params["paper"]["daily_loss_fraction"]),
             taker_fee_rate=float(params["paper"]["taker_fee_rate"]),
+            maker_fee_rate=float(params["paper"].get("maker_fee_rate", 0.0002)),
             slippage_bp=float(params["paper"]["slippage_bp"]),
             latency_ms=int(params["paper"]["latency_ms"]),
+            entry_ttl_ms=int(self.protocol_data["execution_policy"]["entry_ttl_ms"]),
         )
         self.executor.restore()
         self.max_book_age_ms = int(params["data_quality"]["max_book_age_ms"])
         self.warmup_ms = int(params["data_quality"]["warmup_minutes_after_snapshot"]) * 60_000
         self.states: dict[str, SymbolState] = {}
+        self.footprint: Footprint | None = None
+        self.dom: DomTracker | None = None
+        self.connection_id = "disconnected"
+        self.stream_connected = False
         self.evaluation_eligible = False
         if orphaned:
             self.journal.event(_now_ms(), "WARN", "RESTART_RECONCILE", f"marked {orphaned} pending triggers MISSED")
@@ -98,8 +131,12 @@ class PaperApp:
         day = now.date().isoformat()
         session_deadline = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), UTC)
         existing = self.journal.universe_for_date(day)
+        symbol_meta: dict[str, dict[str, Any]] = {}
         if existing:
             symbols = [str(row["symbol"]) for row in existing]
+            for row in existing:
+                metrics = json.loads(str(row.get("metrics_json", "{}")))
+                symbol_meta[str(row["symbol"])] = metrics
             run = self.journal.universe_run_for_date(day)
             self.evaluation_eligible = bool(run and run["source"].get("evaluation_eligible", False))
             self.journal.event(_now_ms(), "INFO", "UNIVERSE_RESTORE", f"restored {len(symbols)} daily symbols")
@@ -141,8 +178,64 @@ class PaperApp:
                 members=members,
             )
             self.journal.event(_now_ms(), "INFO", "UNIVERSE", f"selected {len(symbols)} symbols", {"symbols": symbols})
+            symbol_meta = {item.symbol: item.to_dict() for item in snapshot.selected}
 
-        self.states = {symbol: SymbolState(symbol) for symbol in symbols}
+        missing_meta = [symbol for symbol in symbols if not symbol_meta.get(symbol, {}).get("tick_size")]
+        if missing_meta:
+            instruments = await asyncio.to_thread(self.client.list_linear_usdt_perpetual_instruments)
+            by_symbol = {str(item.get("symbol", "")): item for item in instruments}
+            for symbol in missing_meta:
+                item = by_symbol.get(symbol, {})
+                price_filter = item.get("priceFilter", {}) if isinstance(item, dict) else {}
+                lot_filter = item.get("lotSizeFilter", {}) if isinstance(item, dict) else {}
+                symbol_meta[symbol] = {
+                    **symbol_meta.get(symbol, {}),
+                    "tick_size": price_filter.get("tickSize"),
+                    "qty_step": lot_filter.get("qtyStep"),
+                    "min_order_qty": lot_filter.get("minOrderQty"),
+                }
+        invalid_meta = [
+            symbol
+            for symbol in symbols
+            if any(float(symbol_meta.get(symbol, {}).get(key) or 0) <= 0 for key in ("tick_size", "qty_step", "min_order_qty"))
+        ]
+        if invalid_meta:
+            raise RuntimeError(f"missing positive public instrument metadata: {invalid_meta}")
+        self.states = {
+            symbol: SymbolState(
+                symbol,
+                tick_size=float(symbol_meta[symbol]["tick_size"]),
+                qty_step=float(symbol_meta[symbol]["qty_step"]),
+                min_order_qty=float(symbol_meta[symbol]["min_order_qty"]),
+            )
+            for symbol in symbols
+        }
+        strategy_params = self.protocol_data["parameters"]["strategy"]
+        execution = self.protocol_data["execution_policy"]
+        quality = self.protocol_data["parameters"]["data_quality"]
+        self.strategies = {}
+        for symbol, state in self.states.items():
+            evaluator = StrategyV2Evaluator(
+                **{**strategy_params, "tick_size": state.tick_size},
+                entry_latency_ms=int(execution["entry_latency_ms"]),
+                entry_ttl_ms=int(execution["entry_ttl_ms"]),
+                confirmation_timeout_ms=int(execution["confirmation_timeout_ms"]),
+                cooldown_ms=int(execution["cooldown_ms"]),
+                max_book_age_ms=int(quality["max_book_age_ms"]),
+                max_spread_bp=float(self.protocol_data["parameters"]["universe"]["max_spread_bps"]),
+                min_depth_notional_top5=float(
+                    self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"]
+                ),
+            )
+            evaluator.restore_attempts(self.restored_setup_ids)
+            self.strategies[symbol] = evaluator
+        tick_sizes = {symbol: str(state.tick_size) for symbol, state in self.states.items()}
+        wall_thresholds = {
+            symbol: str(self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"])
+            for symbol in symbols
+        }
+        self.footprint = Footprint(tick_sizes, warmup_ms=self.warmup_ms)
+        self.dom = DomTracker(wall_thresholds, warmup_ms=self.warmup_ms)
         await asyncio.gather(*(self._bootstrap(state) for state in self.states.values()))
         stop = asyncio.Event()
         rollover = asyncio.create_task(self._stop_at_deadline(stop, session_deadline))
@@ -173,17 +266,20 @@ class PaperApp:
             state = str(message.get("state", "unknown"))
             self.journal.set_meta("stream_state", state)
             if state == "disconnected":
+                self.stream_connected = False
                 for symbol_state in self.states.values():
                     symbol_state.book.invalidate()
                     symbol_state.snapshot_received_at_ms = None
-                pending = self.executor.cancel_pending()
-                if pending:
-                    self.journal.update_signal_status(pending.signal_id, "MISSED", "market_stream_disconnected")
+                    symbol_state.last_blocker = "stream_disconnected"
+                    symbol_state.orderflow_ready = False
+                self.executor.cancel_pending("market_stream_disconnected", received_at_ms)
                 detail = {"error": str(message.get("error", "")), "open_position": bool(self.executor.position)}
                 self.journal.event(
                     received_at_ms, "WARN", "STREAM_DISCONNECTED", "public market stream disconnected", detail
                 )
             else:
+                self.stream_connected = True
+                self.connection_id = uuid.uuid4().hex
                 self.journal.event(received_at_ms, "INFO", "STREAM_CONNECTED", "public market stream connected")
             return
         topic = str(message.get("topic", ""))
@@ -196,24 +292,36 @@ class PaperApp:
                 state.book.apply(message, received_at_ms)
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
                     state.snapshot_received_at_ms = received_at_ms
-                result = self.executor.on_quote(symbol, Quote(received_at_ms, state.book.best_bid, state.book.best_ask))
-                if result and result["event"] == "OPEN" and self.executor.position:
-                    self.journal.update_signal_status(
-                        self.executor.position.signal.signal_id, "OPEN", "paper taker entry"
-                    )
-                elif result and result["event"] == "CLOSE":
-                    # The position is already closed; resolve the signal through the position id.
-                    self._mark_closed_signal(str(result["position_id"]), str(result["exit_reason"]))
-            except ValueError as exc:
-                pending = self.executor.cancel_pending()
-                if pending:
-                    self.journal.update_signal_status(pending.signal_id, "MISSED", str(exc))
+                wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
+                if self.footprint is not None:
+                    self.footprint.process(wrapped)
+                if self.dom is not None:
+                    state.last_dom_events = self.dom.process(wrapped)[-20:]
+                self.executor.on_quote(symbol, self._quote(state, received_at_ms))
+            except (TypeError, ValueError) as exc:
+                self.executor.cancel_pending(str(exc), received_at_ms)
                 self.journal.event(received_at_ms, "WARN", "BOOK", str(exc), {"symbol": symbol})
                 raise
             return
         if topic.startswith("publicTrade."):
+            wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
+            completed_footprints = self.footprint.process(wrapped) if self.footprint is not None else []
+            if self.dom is not None:
+                self.dom.process(wrapped)
             for row in message.get("data", []):
                 await self._trade(row, received_at_ms)
+                symbol = str(row.get("s", ""))
+                execution = self.executor.on_trade(
+                    symbol,
+                    received_at_ms,
+                    str(row.get("S", "")),
+                    float(row.get("p", 0)),
+                    float(row.get("v", 0)),
+                )
+                if execution and execution.get("event") in {"OPEN", "PARTIAL"}:
+                    self.journal.event(received_at_ms, "INFO", "PAPER_FILL", str(execution["event"]), execution)
+            for footprint in completed_footprints:
+                self._complete_footprint(footprint, received_at_ms)
 
     async def _trade(self, row: dict[str, Any], received_at_ms: int) -> None:
         symbol = str(row.get("s", ""))
@@ -222,7 +330,6 @@ class PaperApp:
             return
         try:
             trade = Trade(symbol, received_at_ms, str(row["i"]), float(row["p"]), float(row["v"]), str(row["S"]))
-            completed_one = False
             for name in ("4h", "15m", "5m", "1m"):
                 for completed in state.builders[name].add(trade):
                     if state.bars[name] and completed.opened_at_ms <= state.bars[name][-1].opened_at_ms:
@@ -232,51 +339,177 @@ class PaperApp:
                     state.bars[name] = state.bars[name][-500:]
                     if name in state.level_engines:
                         state.levels.extend(state.level_engines[name].add(completed))
-                    completed_one = completed_one or name == "1m"
-            if completed_one:
-                self._evaluate(state, received_at_ms)
         except (KeyError, TypeError, ValueError) as exc:
             self.journal.event(received_at_ms, "WARN", "TRADE", str(exc), {"symbol": symbol})
 
-    def _evaluate(self, state: SymbolState, now_ms: int) -> None:
+    def _quote(self, state: SymbolState, received_at_ms: int) -> Quote:
+        return Quote(
+            received_at_ms,
+            state.book.best_bid,
+            state.book.best_ask,
+            state.book.bids[state.book.best_bid],
+            state.book.asks[state.book.best_ask],
+            dict(state.book.bids),
+            dict(state.book.asks),
+        )
+
+    def _complete_footprint(self, footprint: dict[str, Any], evaluated_at_ms: int | None = None) -> None:
+        symbol = str(footprint["symbol"])
+        state = self.states.get(symbol)
+        if state is None:
+            return
+        bar = Bar(
+            symbol=symbol,
+            timeframe_ms=15_000,
+            opened_at_ms=int(footprint["bucket_start_ms"]),
+            closed_at_ms=int(footprint["bucket_end_ms"]),
+            open=float(footprint["open"]),
+            high=float(footprint["high"]),
+            low=float(footprint["low"]),
+            close=float(footprint["close"]),
+            volume=float(footprint["volume"]),
+            delta_notional=float(footprint["delta_notional"]),
+            trades=int(footprint["trades"]),
+        )
+        if state.bars["15s"] and bar.opened_at_ms <= state.bars["15s"][-1].opened_at_ms:
+            return
+        state.bars["15s"].append(bar)
+        state.bars["15s"] = state.bars["15s"][-500:]
+        self.journal.record_bar("15s", bar, "public_trade_footprint")
+        state.orderflow_ready = not bool(footprint.get("incomplete") or footprint.get("partial"))
+        if not state.orderflow_ready:
+            state.last_orderflow = {
+                "delta_15s": bar.delta_notional,
+                "footprint_stack": 0,
+                "updated_at": _stamp(bar.closed_at_ms),
+                "status": "incomplete",
+            }
+            return
+        self._evaluate_v2(state, footprint, evaluated_at_ms or bar.closed_at_ms)
+
+    def _readiness(self, state: SymbolState, now_ms: int) -> dict[str, Any]:
+        warmup_remaining = (
+            self.warmup_ms
+            if state.snapshot_received_at_ms is None
+            else max(0, state.snapshot_received_at_ms + self.warmup_ms - now_ms)
+        )
+        book_ready = state.book.healthy(now_ms, self.max_book_age_ms, float(self.protocol_data["parameters"]["universe"]["max_spread_bps"]))
+        blocker = None
         if not self.evaluation_eligible:
-            self.journal.event(
-                now_ms,
-                "INFO",
-                "SIGNAL_BLOCK",
-                "partial UTC-day bootstrap is observation-only",
-                {"symbol": state.symbol},
+            blocker = "partial_day_observation_only"
+        elif not self.stream_connected:
+            blocker = "stream_disconnected"
+        elif not state.book.ready:
+            blocker = "book_snapshot_required"
+        elif warmup_remaining > 0:
+            blocker = "post_snapshot_warmup"
+        elif not book_ready:
+            blocker = "book_stale_or_spread"
+        elif not state.orderflow_ready:
+            blocker = "orderflow_incomplete"
+        return {
+            "eligible": self.evaluation_eligible,
+            "stream_ready": self.stream_connected and state.book.ready,
+            "gap_free": state.book.ready and state.snapshot_received_at_ms is not None and state.orderflow_ready,
+            "warmup_remaining_s": math.ceil(warmup_remaining / 1000),
+            "book_ready": book_ready,
+            "blocker": blocker,
+            "ready": blocker is None,
+        }
+
+    def _evaluate_v2(self, state: SymbolState, footprint: dict[str, Any], now_ms: int) -> None:
+        readiness = self._readiness(state, now_ms)
+        blocker = readiness["blocker"]
+        if blocker:
+            if blocker != state.last_blocker:
+                self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", blocker, {"symbol": state.symbol})
+                state.last_blocker = blocker
+            return
+        state.last_blocker = None
+        prior = state.bars["15s"][-21:-1]
+        median_delta = median(abs(bar.delta_notional) for bar in prior) if prior else 0.0
+        ranges = [((bar.high / bar.low) - 1) * 10_000 for bar in prior if bar.low > 0]
+        median_range = median(ranges) if ranges else 0.0
+        bid_notional = sum(price * size for price, size in sorted(state.book.bids.items(), reverse=True)[:5])
+        ask_notional = sum(price * size for price, size in sorted(state.book.asks.items())[:5])
+        current = state.bars["15s"][-1]
+        orderflow = OrderflowFrame(
+            symbol=state.symbol,
+            received_at_ms=now_ms,
+            best_bid=state.book.best_bid,
+            best_bid_size=state.book.bids[state.book.best_bid],
+            best_ask=state.book.best_ask,
+            best_ask_size=state.book.asks[state.book.best_ask],
+            delta_notional=current.delta_notional,
+            median_abs_delta_20=median_delta,
+            range_bp=(current.high / current.low - 1) * 10_000,
+            median_range_bp_20=median_range,
+            top5_bid_notional=bid_notional,
+            top5_ask_notional=ask_notional,
+            atr_1m=self._atr(state.bars["1m"]),
+            book_age_ms=max(0, now_ms - int(state.book.received_at_ms or 0)),
+            spread_bp=(state.book.best_ask / state.book.best_bid - 1) * 10_000,
+        )
+        state.last_orderflow = {
+            "delta_15s": current.delta_notional,
+            "microprice_bias_bp": orderflow.microprice_mid_bp,
+            "top5_imbalance": orderflow.book_imbalance,
+            "dom_persistence": sum(event.get("type") == "wall_persistent" for event in state.last_dom_events),
+            "dom_refill": sum(bool(event.get("refill_candidate")) for event in state.last_dom_events),
+            "footprint_stack": len(footprint.get("stacks", [])),
+            "updated_at": _stamp(now_ms),
+        }
+        levels = [
+            V2Level(
+                level.level_id,
+                level.symbol,
+                level.timeframe,
+                V2LevelSide(level.side.value),
+                level.price,
+                level.confirmed_at_ms,
+                level.touches,
+                level.level_class,
+                level.origin_at_ms,
             )
-            return
-        if not state.book.healthy(now_ms, self.max_book_age_ms, 20.0):
-            self.journal.event(
-                now_ms, "WARN", "SIGNAL_BLOCK", "book stale or spread too wide", {"symbol": state.symbol}
-            )
-            return
-        if state.snapshot_received_at_ms is None or now_ms - state.snapshot_received_at_ms < self.warmup_ms:
-            self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", "post-snapshot warmup", {"symbol": state.symbol})
-            return
-        decisions = self.strategy.evaluate(
+            for level in state.levels
+        ]
+        decisions = self.strategies[state.symbol].evaluate(
             symbol=state.symbol,
             now_ms=now_ms,
             bars=state.bars,
-            levels=state.levels,
-            book_imbalance=state.book.imbalance(5),
+            levels=levels,
+            orderflow=orderflow,
         )
-        price = state.bars["1m"][-1].close
+        price = state.bars["15s"][-1].close
         for decision in decisions:
-            self._record_decision(state, decision, price, now_ms)
+            if decision.signal is not None or decision.status == "MISSED" or decision.setup_id is not None:
+                decision_key = f"{decision.setup_id}:{decision.status}:{decision.reason}"
+                if decision_key in state.recorded_decisions:
+                    continue
+                state.recorded_decisions.add(decision_key)
+                self._record_decision(state, decision, price, now_ms)
 
-    def _record_decision(self, state: SymbolState, decision: StrategyDecision, price: float, now_ms: int) -> None:
-        target = decision.target
+    @staticmethod
+    def _atr(bars: list[Bar], period: int = 14) -> float:
+        if len(bars) < period + 1:
+            return 0.0
+        sample = bars[-(period + 1) :]
+        values = [
+            max(bar.high - bar.low, abs(bar.high - previous.close), abs(bar.low - previous.close))
+            for previous, bar in pairwise(sample)
+        ]
+        return sum(values) / len(values)
+
+    def _record_decision(self, state: SymbolState, decision: StrategyDecisionV2, price: float, now_ms: int) -> None:
+        target = decision.target_level
         signal = decision.signal
         signal_id = signal.signal_id if signal else uuid.uuid4().hex
-        side = (
-            signal.side.value if signal else ("LONG" if float(decision.features.get("trend_pct", 0)) >= 0 else "SHORT")
-        )
+        side = signal.side.value if signal else (decision.side.value if decision.side else "LONG")
         features = dict(decision.features)
         if target:
             features["level_id"] = target.level_id
+        if decision.setup_id:
+            features["setup_id"] = decision.setup_id
         row = {
             "signal_id": signal_id,
             "occurred_at_ms": now_ms,
@@ -286,8 +519,8 @@ class PaperApp:
             "target_timeframe": target.timeframe if target else "none",
             "level_class": target.level_class if target else "none",
             "trigger_price": price,
-            "stop_price": signal.stop_price if signal else price,
-            "target_price": signal.target_price if signal else (target.price if target else price),
+            "stop_price": signal.stop_price if signal else (decision.stop_price or price),
+            "target_price": signal.target_price if signal else (decision.target_price or price),
             "status": decision.status,
             "reason": decision.reason,
             "protocol_hash": self.protocol_hash,
@@ -299,7 +532,14 @@ class PaperApp:
             if blocker:
                 self.journal.update_signal_status(signal.signal_id, "MISSED", blocker)
             else:
-                self.executor.submit(signal)
+                submitted = self.executor.submit(
+                    signal,
+                    self._quote(state, now_ms),
+                    qty_step=state.qty_step,
+                    min_order_qty=state.min_order_qty,
+                )
+                if not submitted:
+                    self.journal.update_signal_status(signal.signal_id, "MISSED", "post_only_submission_rejected")
 
     def _mark_closed_signal(self, position_id: str, reason: str) -> None:
         with self.journal.connect() as db:
@@ -357,12 +597,15 @@ class PaperApp:
             pending = self.executor.pending
             open_orders.append(
                 {
-                    "time": _stamp(pending.occurred_at_ms),
-                    "symbol": pending.symbol,
-                    "type": "ENTRY",
-                    "side": pending.side.value,
-                    "price": "next executable quote",
-                    "status": "TRIGGERED",
+                    "time": _stamp(pending.created_at_ms),
+                    "symbol": pending.signal.symbol,
+                    "type": "POST-ONLY ENTRY",
+                    "side": pending.signal.side.value,
+                    "price": pending.entry_price,
+                    "status": pending.status,
+                    "filled_qty": pending.filled_qty,
+                    "quantity": pending.quantity,
+                    "queue_ahead_qty": pending.queue_ahead_qty,
                 }
             )
         if row:
@@ -402,6 +645,8 @@ class PaperApp:
             "positions": positions,
             "open_orders": open_orders,
             "history": history,
+            "readiness": self._readiness(state, now_ms),
+            "orderflow": state.last_orderflow,
         }
 
 

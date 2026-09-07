@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY pyproject.toml README.md paper_strategy_v1.json ./
+COPY pyproject.toml README.md paper_strategy_v1.json paper_strategy_v2.json ./
 COPY src ./src
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 1000 paper
