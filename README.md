@@ -28,6 +28,9 @@ executable entry, TP/SL, costs, data quality, and restart state.
   4h swings and paper brackets, plus Paper trading, Open orders and History
   tabs. Its header reports server heartbeat, public WebSocket state and book
   snapshot readiness; it exposes no order or mutation controls.
+- The chart supports cursor-centered wheel zoom, pointer/touch drag panning,
+  arrow/zoom controls and reset. Horizontal level rays begin at their actual
+  pivot candle (or the price-defining pivot of a cluster) and extend right.
 
 ## Local verification
 

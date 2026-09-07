@@ -26,6 +26,7 @@ class Level:
     confirmed_at_ms: int
     touches: int = 1
     level_class: str = "swing"
+    origin_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,15 @@ class CausalLevelEngine:
     def _level(self, bar: Bar, side: LevelSide, price: float, confirmed_at_ms: int) -> Level:
         raw = f"{bar.symbol}:{self.timeframe}:{side.value}:{bar.opened_at_ms}:{price:.12g}"
         level_id = hashlib.sha256(raw.encode()).hexdigest()[:20]
-        return Level(level_id, bar.symbol, self.timeframe, side, price, confirmed_at_ms)
+        return Level(
+            level_id,
+            bar.symbol,
+            self.timeframe,
+            side,
+            price,
+            confirmed_at_ms,
+            origin_at_ms=bar.opened_at_ms,
+        )
 
 
 class StrategyEvaluator:
@@ -330,6 +339,11 @@ def _cluster_targets(levels: Sequence[Level], side: Side, tolerance_bp: float = 
                 max(candidate.confirmed_at_ms for candidate in group),
                 sum(candidate.touches for candidate in group),
                 "cluster",
+                min(
+                    candidate.origin_at_ms if candidate.origin_at_ms is not None else candidate.confirmed_at_ms
+                    for candidate in group
+                    if candidate.price == target_price
+                ),
             )
         )
     return result
@@ -358,6 +372,8 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
         return []
     high = max(bar.high for bar in rows)
     low = min(bar.low for bar in rows)
+    high_origin = next(bar.opened_at_ms for bar in rows if bar.high == high)
+    low_origin = next(bar.opened_at_ms for bar in rows if bar.low == low)
     return [
         Level(
             hashlib.sha256(f"{symbol}:prevday:high:{previous_start}".encode()).hexdigest()[:20],
@@ -368,6 +384,7 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
             today,
             1,
             "previous_day",
+            high_origin,
         ),
         Level(
             hashlib.sha256(f"{symbol}:prevday:low:{previous_start}".encode()).hexdigest()[:20],
@@ -378,5 +395,6 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
             today,
             1,
             "previous_day",
+            low_origin,
         ),
     ]

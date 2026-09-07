@@ -23,6 +23,7 @@ def test_level_is_confirmed_only_after_two_right_bars() -> None:
     assert len(levels) == 1
     assert levels[0].side is LevelSide.HIGH
     assert levels[0].confirmed_at_ms == rows[-1].closed_at_ms
+    assert levels[0].origin_at_ms == rows[2].opened_at_ms
 
 
 def test_early_lane_emits_once_with_trend_flow_book_and_target() -> None:
@@ -64,15 +65,17 @@ def test_previous_day_levels_are_not_known_before_day_boundary() -> None:
     assert {level.level_class for level in levels} == {"previous_day"}
     assert {level.side for level in levels} == {LevelSide.HIGH, LevelSide.LOW}
     assert all(level.confirmed_at_ms == 2 * day for level in levels)
+    assert {level.origin_at_ms for level in levels} == {bars[-1].opened_at_ms}
 
 
 def test_display_levels_keep_4h_and_clustered_15m_not_single_pivots() -> None:
     levels = [
         Level("h4", "XUSDT", "4h", LevelSide.HIGH, 110, 1),
-        Level("a", "XUSDT", "15m", LevelSide.HIGH, 105.00, 1),
-        Level("b", "XUSDT", "15m", LevelSide.HIGH, 105.05, 2),
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 105.00, 1, origin_at_ms=10),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 105.05, 2, origin_at_ms=20),
         Level("noise", "XUSDT", "15m", LevelSide.LOW, 97, 3),
     ]
     result = current_display_levels(levels, "XUSDT", 100, 10)
     assert {level.level_class for level in result} == {"swing", "cluster"}
     assert all(level.level_id != "noise" for level in result)
+    assert next(level for level in result if level.level_class == "cluster").origin_at_ms == 10
