@@ -331,9 +331,19 @@ class PaperApp:
         state = self.states.get(symbol)
         if state is None:
             raise ValueError("symbol is not in the daily universe")
-        bars = state.bars[timeframe][-180:]
-        last_price = bars[-1].close if bars else None
-        levels = current_display_levels(state.levels, symbol, last_price, _now_ms()) if last_price is not None else []
+        now_ms = _now_ms()
+        forming = state.builders[timeframe].current()
+        if forming is not None and forming.closed_at_ms <= now_ms:
+            forming = None
+        completed = state.bars[timeframe]
+        if forming is not None and completed and forming.opened_at_ms <= completed[-1].opened_at_ms:
+            forming = None
+        bars = completed[-(179 if forming is not None else 180) :]
+        bar_payload = [{**asdict(bar), "is_forming": False} for bar in bars]
+        if forming is not None:
+            bar_payload.append({**asdict(forming), "is_forming": True})
+        last_price = forming.close if forming is not None else bars[-1].close if bars else None
+        levels = current_display_levels(state.levels, symbol, last_price, now_ms) if last_price is not None else []
         quote: dict[str, float] | None = None
         if state.book.ready:
             bid, ask = state.book.best_bid, state.book.best_ask
@@ -383,7 +393,9 @@ class PaperApp:
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "bars": [asdict(bar) for bar in bars],
+            "bars": bar_payload,
+            "server_time_ms": now_ms,
+            "bar_closes_at_ms": (now_ms // TIMEFRAMES[timeframe] + 1) * TIMEFRAMES[timeframe],
             "levels": [asdict(level) for level in levels],
             "quote": quote,
             "last_price": last_price,

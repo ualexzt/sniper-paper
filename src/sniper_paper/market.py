@@ -129,6 +129,7 @@ class BarBuilder:
         self._bucket: int | None = None
         self._trades: list[Trade] = []
         self._seen_ids: set[str] = set()
+        self._current: Bar | None = None
 
     def add(self, trade: Trade) -> list[Bar]:
         if trade.symbol != self.symbol:
@@ -142,17 +143,27 @@ class BarBuilder:
         if self._bucket is not None and bucket > self._bucket:
             completed.append(self._finish())
             self._trades = []
+            self._current = None
         self._bucket = bucket
         self._seen_ids.add(trade.trade_id)
         self._trades.append(trade)
+        self._current = self._snapshot()
         if len(self._seen_ids) > 100_000:
             self._seen_ids = {item.trade_id for item in self._trades}
         return completed
 
+    def current(self) -> Bar | None:
+        """Return an immutable UI snapshot without completing or persisting the bar."""
+        return self._current
+
     def _finish(self) -> Bar:
         if self._bucket is None or not self._trades:
             raise RuntimeError("cannot finish empty bar")
-        prices = [trade.price for trade in self._trades]
+        return self._snapshot()
+
+    def _snapshot(self) -> Bar:
+        trades = tuple(self._trades)
+        prices = [trade.price for trade in trades]
         return Bar(
             symbol=self.symbol,
             timeframe_ms=self.timeframe_ms,
@@ -162,7 +173,7 @@ class BarBuilder:
             high=max(prices),
             low=min(prices),
             close=prices[-1],
-            volume=sum(trade.quantity for trade in self._trades),
-            delta_notional=sum(trade.signed_notional for trade in self._trades),
-            trades=len(self._trades),
+            volume=sum(trade.quantity for trade in trades),
+            delta_notional=sum(trade.signed_notional for trade in trades),
+            trades=len(trades),
         )

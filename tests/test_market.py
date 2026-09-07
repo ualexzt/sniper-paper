@@ -55,6 +55,18 @@ def test_bar_builder_is_receive_time_causal_and_deduplicates() -> None:
     assert bar.delta_notional == -99
 
 
+def test_bar_builder_exposes_forming_snapshot_without_completing_it() -> None:
+    builder = BarBuilder("BTCUSDT", 60_000)
+    builder.add(Trade("BTCUSDT", 1_000, "a", 100, 2, "Sell"))
+    builder.add(Trade("BTCUSDT", 2_000, "b", 103, 1, "Buy"))
+
+    forming = builder.current()
+
+    assert forming is not None
+    assert (forming.open, forming.high, forming.low, forming.close, forming.trades) == (100, 103, 100, 103, 2)
+    assert builder.current() == forming
+
+
 def test_bar_builder_rejects_late_receive_time() -> None:
     builder = BarBuilder("ETHUSDT", 60_000)
     builder.add(Trade("ETHUSDT", 61_000, "a", 10, 1, "Buy"))

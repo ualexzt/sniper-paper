@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from sniper_paper.app import PaperApp, SymbolState, _parse_klines
-from sniper_paper.market import Bar
+from sniper_paper.market import Bar, Trade
 from sniper_paper.storage import Journal
 from sniper_paper.strategy import Level, LevelSide
 
@@ -44,3 +44,22 @@ def test_market_detail_exposes_real_state_and_rejects_out_of_universe(tmp_path: 
     assert result["quote"] == {"bid": 100.0, "ask": 102.0, "mid": 101.0}
     with pytest.raises(ValueError, match="daily universe"):
         app.market_detail("OTHERUSDT", "5m")
+
+
+def test_market_detail_appends_forming_bar_for_dashboard_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    state.bars["1m"] = [Bar("XUSDT", 60_000, 0, 60_000, 99, 101, 98, 100, 10, 1, 2)]
+    state.builders["1m"].add(Trade("XUSDT", 61_000, "live", 102, 3, "Buy"))
+    app.states = {"XUSDT": state}
+    monkeypatch.setattr("sniper_paper.app._now_ms", lambda: 65_000)
+
+    result = app.market_detail("XUSDT", "1m")
+
+    assert len(result["bars"]) == 2
+    assert result["bars"][0]["is_forming"] is False
+    assert result["bars"][1]["is_forming"] is True
+    assert result["bars"][1]["close"] == 102
+    assert result["bar_closes_at_ms"] == 120_000
+    assert result["server_time_ms"] == 65_000
+    assert len(state.bars["1m"]) == 1
