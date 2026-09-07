@@ -421,14 +421,6 @@ class PaperApp:
         }
 
     def _evaluate_v2(self, state: SymbolState, footprint: dict[str, Any], now_ms: int) -> None:
-        readiness = self._readiness(state, now_ms)
-        blocker = readiness["blocker"]
-        if blocker:
-            if blocker != state.last_blocker:
-                self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", blocker, {"symbol": state.symbol})
-                state.last_blocker = blocker
-            return
-        state.last_blocker = None
         prior = state.bars["15s"][-21:-1]
         median_delta = median(abs(bar.delta_notional) for bar in prior) if prior else 0.0
         ranges = [((bar.high / bar.low) - 1) * 10_000 for bar in prior if bar.low > 0]
@@ -462,6 +454,14 @@ class PaperApp:
             "footprint_stack": len(footprint.get("stacks", [])),
             "updated_at": _stamp(now_ms),
         }
+        readiness = self._readiness(state, now_ms)
+        blocker = readiness["blocker"]
+        if blocker:
+            if blocker != state.last_blocker:
+                self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", blocker, {"symbol": state.symbol})
+                state.last_blocker = blocker
+            return
+        state.last_blocker = None
         levels = [
             V2Level(
                 level.level_id,

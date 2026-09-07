@@ -123,3 +123,27 @@ def test_orderbook_message_does_not_drop_completed_footprint(tmp_path: Path) -> 
 
     assert len(state.bars["15s"]) == 1
     assert state.bars["15s"][0].close == 100.0
+
+
+def test_observation_only_still_refreshes_orderflow_panel(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    state.book.apply(
+        {
+            "type": "snapshot",
+            "data": {"s": "XUSDT", "u": 1, "seq": 1, "b": [["100", "2"]], "a": [["100.01", "3"]]},
+        },
+        15_000,
+    )
+    state.snapshot_received_at_ms = 0
+    state.orderflow_ready = True
+    state.bars["15s"] = [Bar("XUSDT", 15_000, 0, 15_000, 100, 100.01, 99.99, 100, 1, 250, 2)]
+    app.stream_connected = True
+    app.evaluation_eligible = False
+
+    app._evaluate_v2(state, {"stacks": [{"side": "buy"}]}, 15_000)
+
+    assert state.last_orderflow is not None
+    assert state.last_orderflow["delta_15s"] == 250
+    assert state.last_orderflow["footprint_stack"] == 1
+    assert "status" not in state.last_orderflow
