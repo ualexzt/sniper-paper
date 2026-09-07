@@ -105,6 +105,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Paper trading", html)
         self.assertIn("Open orders", html)
         self.assertIn("WebSocket", html)
+        self.assertIn('id="y-auto"', html)
+        self.assertIn("futureBars", html)
         self.assertIn("Snapshot \\u003cready\\u003e", html)
         self.assertIn('"outcome":"REJECTED"', html)
 
