@@ -1,562 +1,64 @@
 <!doctype html>
-<html lang="en">
+<html lang="uk">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="10">
   <title>__DASHBOARD_TITLE__</title>
   <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0b1020;
-      --panel: rgba(16, 24, 48, 0.92);
-      --panel-strong: #111a33;
-      --text: #edf2ff;
-      --muted: #99a7c2;
-      --border: rgba(146, 165, 207, 0.18);
-      --accent: #7dd3fc;
-      --accent-2: #c4b5fd;
-      --ok: #34d399;
-      --warn: #fbbf24;
-      --bad: #fb7185;
-      --shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      min-height: 100%;
-      background:
-        radial-gradient(circle at top left, rgba(125, 211, 252, 0.10), transparent 30%),
-        radial-gradient(circle at right top, rgba(196, 181, 253, 0.10), transparent 24%),
-        linear-gradient(180deg, #09101f 0%, #0b1020 42%, #070b15 100%);
-      color: var(--text);
-    }
-
-    body {
-      padding: 24px;
-    }
-
-    .shell {
-      max-width: 1440px;
-      margin: 0 auto;
-    }
-
-    .hero {
-      display: grid;
-      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
-      gap: 16px;
-      align-items: stretch;
-      margin-bottom: 16px;
-    }
-
-    .hero-card, .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-    }
-
-    .hero-card {
-      padding: 20px 22px;
-    }
-
-    .eyebrow {
-      color: var(--accent);
-      text-transform: uppercase;
-      letter-spacing: 0.18em;
-      font-size: 11px;
-      font-weight: 700;
-      margin: 0 0 10px;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: clamp(28px, 4vw, 44px);
-      line-height: 1.02;
-    }
-
-    .lede {
-      margin: 12px 0 0;
-      max-width: 72ch;
-      color: var(--muted);
-      line-height: 1.45;
-    }
-
-    .meta-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .meta {
-      padding: 16px;
-      background: linear-gradient(180deg, rgba(17, 26, 51, 0.98), rgba(12, 18, 35, 0.98));
-      border-radius: 18px;
-      border: 1px solid var(--border);
-    }
-
-    .meta-label {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      margin-bottom: 8px;
-    }
-
-    .meta-value {
-      font-size: 18px;
-      font-weight: 700;
-      line-height: 1.25;
-    }
-
-    .meta-sub {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 16px;
-    }
-
-    .panel {
-      padding: 16px;
-      grid-column: span 6;
-    }
-
-    .panel.wide { grid-column: span 12; }
-    .panel.third { grid-column: span 4; }
-
-    .panel h2 {
-      margin: 0 0 12px;
-      font-size: 18px;
-    }
-
-    .section-note {
-      color: var(--muted);
-      font-size: 13px;
-      margin: -4px 0 12px;
-    }
-
-    .chips, .cards, .table-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .chips {
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    }
-
-    .chip, .row, .card {
-      border: 1px solid var(--border);
-      background: rgba(10, 15, 30, 0.54);
-      border-radius: 14px;
-      padding: 12px 14px;
-    }
-
-    .chip-header, .row-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: baseline;
-    }
-
-    .chip-label, .row-label {
-      font-weight: 700;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      background: rgba(125, 211, 252, 0.12);
-      color: var(--accent);
-      white-space: nowrap;
-    }
-
-    .badge.ok { color: var(--ok); background: rgba(52, 211, 153, 0.12); }
-    .badge.warn { color: var(--warn); background: rgba(251, 191, 36, 0.12); }
-    .badge.bad { color: var(--bad); background: rgba(251, 113, 133, 0.12); }
-
-    .detail {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
-    }
-
-    .kv-grid {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .kv {
-      padding: 10px 11px;
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-    }
-
-    .kv .label {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      margin-bottom: 4px;
-    }
-
-    .kv .value {
-      font-variant-numeric: tabular-nums;
-      font-weight: 700;
-    }
-
-    .table-head {
-      display: grid;
-      grid-template-columns: 1.1fr 1fr 1fr 1fr 1fr 1fr;
-      gap: 10px;
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.11em;
-      margin-bottom: 10px;
-      padding: 0 6px;
-    }
-
-    .table-row {
-      display: grid;
-      grid-template-columns: 1.1fr 1fr 1fr 1fr 1fr 1fr;
-      gap: 10px;
-      align-items: center;
-      padding: 12px 6px;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .table-row:first-of-type {
-      border-top: 0;
-      padding-top: 0;
-    }
-
-    .mono {
-      font-variant-numeric: tabular-nums;
-    }
-
-    .muted {
-      color: var(--muted);
-    }
-
-    .empty {
-      padding: 18px;
-      border-radius: 16px;
-      border: 1px dashed rgba(153, 167, 194, 0.35);
-      color: var(--muted);
-      background: rgba(255, 255, 255, 0.02);
-      line-height: 1.5;
-    }
-
-    .footer {
-      margin-top: 16px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    @media (max-width: 1100px) {
-      .hero {
-        grid-template-columns: 1fr;
-      }
-
-      .panel, .panel.third {
-        grid-column: span 12;
-      }
-
-      .table-head, .table-row {
-        grid-template-columns: 1fr 1fr 1fr;
-      }
-
-      .table-head span:nth-child(n + 4),
-      .table-row span:nth-child(n + 4) {
-        display: none;
-      }
-    }
-
-    @media (max-width: 720px) {
-      body { padding: 14px; }
-
-      .meta-grid, .chips, .kv-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .table-head, .table-row {
-        grid-template-columns: 1fr 1fr;
-      }
-
-      .table-head span:nth-child(n + 3),
-      .table-row span:nth-child(n + 3) {
-        display: none;
-      }
-
-      .hero-card, .panel {
-        padding: 14px;
-      }
-    }
+    :root{color-scheme:dark;--bg:#070a0f;--side:#0b1018;--panel:#0e141e;--line:#202b3a;--text:#e7edf5;--muted:#8190a5;--cyan:#22d3ee;--blue:#60a5fa;--green:#34d399;--red:#fb7185;--amber:#fbbf24;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--text)}button{font:inherit}button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+    .app{display:grid;grid-template-columns:248px minmax(0,1fr);height:100vh;overflow:hidden}.sidebar{background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+    .brand{padding:19px 18px 15px;border-bottom:1px solid var(--line)}.brand-row{display:flex;align-items:center;gap:10px}.mark{width:27px;height:27px;border:1px solid #285879;background:linear-gradient(145deg,#12354a,#0b1825);display:grid;place-items:center;color:var(--cyan);font-weight:900}.brand h1{font-size:15px;margin:0;letter-spacing:.04em}.paper-pill{margin-top:11px;display:inline-flex;gap:6px;align-items:center;color:var(--cyan);font-size:10px;text-transform:uppercase;letter-spacing:.13em}.paper-pill:before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+    .universe-head{padding:15px 14px 9px;display:flex;justify-content:space-between;align-items:center}.universe-head span:first-child{font-size:10px;color:var(--muted);letter-spacing:.14em;text-transform:uppercase;font-weight:700}.count{font-size:10px;color:#bdc8d8;background:#192331;padding:3px 7px;border-radius:10px}.symbols{padding:0 8px 12px;overflow:auto;display:grid;gap:4px}.symbol{width:100%;border:1px solid transparent;background:transparent;color:inherit;text-align:left;padding:10px;border-radius:5px;cursor:pointer;display:grid;grid-template-columns:1fr auto;gap:4px 8px}.symbol:hover{background:#111925}.symbol.active{border-color:#214967;background:#102131;box-shadow:inset 2px 0 var(--cyan)}.symbol-name{font-size:13px;font-weight:750}.symbol-rank,.symbol-metric{font-size:10px;color:var(--muted)}.symbol.active .symbol-name{color:#dffaff}.side-foot{margin-top:auto;padding:12px 14px;border-top:1px solid var(--line);font-size:10px;color:var(--muted);line-height:1.6}
+    .workspace{min-width:0;overflow:auto}.topbar{min-height:66px;padding:9px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);background:rgba(9,13,20,.96);position:sticky;top:0;z-index:5}.instrument{display:flex;align-items:baseline;gap:10px}.instrument h2{font-size:17px;margin:0}.last-price{font-size:14px;color:var(--green);font-variant-numeric:tabular-nums}.system-status{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.sys-chip{display:flex;align-items:center;gap:6px;border:1px solid #263447;background:#101823;padding:6px 8px;border-radius:4px;font-size:9px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase}.sys-chip strong{color:#cbd5e1}.dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px rgba(52,211,153,.65)}.sys-chip.warn .dot{background:var(--amber);box-shadow:none}.sys-chip.bad .dot{background:var(--red);box-shadow:none}.sys-chip.mode{color:var(--amber);border-color:#55401e;background:#211b10}
+    .content{padding:14px;display:grid;gap:14px;min-width:690px}.chart-panel,.trade-panel{border:1px solid var(--line);background:var(--panel)}.chart-toolbar{height:48px;padding:0 13px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.timeframes{display:flex;gap:3px}.tf{border:0;background:transparent;color:var(--muted);font-size:11px;padding:6px 9px;border-radius:3px;cursor:pointer}.tf:hover{color:var(--text)}.tf.active{background:#183047;color:var(--cyan)}.legend{display:flex;gap:13px;font-size:10px;color:var(--muted)}.legend span:before{content:"";display:inline-block;width:11px;height:2px;margin-right:5px;vertical-align:middle;background:var(--blue)}.legend span:nth-child(2):before{background:var(--amber)}.legend span:nth-child(3):before{background:var(--red)}
+    .chart-wrap{position:relative;height:460px;background:linear-gradient(rgba(24,35,50,.22) 1px,transparent 1px),linear-gradient(90deg,rgba(24,35,50,.22) 1px,transparent 1px);background-size:100% 20%,10% 100%}.chart-wrap canvas{width:100%;height:100%;display:block}.chart-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:12px;pointer-events:none}.chart-empty[hidden]{display:none}.level-list{position:absolute;top:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:70%;pointer-events:none}.level-chip{font-size:9px;padding:3px 6px;border:1px solid #31455e;background:rgba(10,16,24,.86);color:#a9c8e9}
+    .tabs{display:flex;height:45px;border-bottom:1px solid var(--line);padding:0 12px;gap:4px}.tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);padding:0 14px;font-size:11px;font-weight:700;cursor:pointer}.tab.active{color:var(--cyan);border-bottom-color:var(--cyan)}.tab-count{margin-left:5px;color:#b9c4d3;background:#1b2634;padding:1px 5px;border-radius:8px}.tab-body{min-height:205px}.pane{display:none}.pane.active{display:block}.empty{height:180px;display:grid;place-items:center;color:var(--muted);font-size:12px}.table{width:100%;border-collapse:collapse;font-size:11px}.table th{text-align:left;padding:10px 13px;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.1em;background:#0b111a}.table td{padding:11px 13px;border-top:1px solid #192331;font-variant-numeric:tabular-nums}.badge{font-size:9px;text-transform:uppercase;padding:3px 6px;border-radius:3px;background:#1a2735;color:#9fb2c8}.badge.long,.pos{color:var(--green)}.badge.short,.neg{color:var(--red)}.badge.missed,.badge.rejected{color:var(--amber)}.footer-note{font-size:10px;color:var(--muted);text-align:right;padding-bottom:4px}
+    @media(max-width:950px){.topbar{align-items:flex-start}.system-status{max-width:55%}}
+    @media(max-width:800px){.app{grid-template-columns:1fr;height:auto;min-height:100vh}.sidebar{position:static;border-right:0;border-bottom:1px solid var(--line)}.brand{padding:13px 14px}.universe-head{padding-top:10px}.symbols{display:flex;overflow-x:auto;padding:0 10px 11px}.symbol{min-width:145px}.side-foot{display:none}.workspace{overflow:visible}.topbar{position:static;display:grid}.system-status{max-width:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));justify-content:stretch}.sys-chip{min-width:0;justify-content:flex-start;overflow:hidden}.sys-chip strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.content{min-width:0;padding:8px}.chart-wrap{height:340px}.legend{display:none}.table-wrap{overflow:auto}.table{min-width:680px}}
   </style>
 </head>
 <body>
-  <div class="shell">
-    <section class="hero">
-      <div class="hero-card">
-        <p class="eyebrow">Operator dashboard</p>
-        <h1>Sniper Paper</h1>
-        <p class="lede">
-          Read-only control surface for the public-data paper flow. It surfaces service and data health,
-          the current daily universe, active paper positions, recent signal outcomes, and lane-specific
-          simulated P&amp;L without exposing any order-entry or write controls.
-        </p>
-      </div>
-
-      <div class="meta-grid">
-        <div class="meta">
-          <span class="meta-label">Generated at</span>
-          <div class="meta-value" id="generated-at">__DASHBOARD_GENERATED__</div>
-          <div class="meta-sub">Snapshot timestamp from the provider.</div>
-        </div>
-        <div class="meta">
-          <span class="meta-label">Last update</span>
-          <div class="meta-value" id="last-update"></div>
-          <div class="meta-sub">Most recent upstream refresh or journal sync.</div>
-        </div>
-        <div class="meta">
-          <span class="meta-label">Headline</span>
-          <div class="meta-value" id="headline"></div>
-          <div class="meta-sub">Main operator note for the current screen.</div>
-        </div>
-        <div class="meta">
-          <span class="meta-label">Mode</span>
-          <div class="meta-value">Read only</div>
-          <div class="meta-sub">No auth, no order routing, no write actions.</div>
-        </div>
-      </div>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-row"><div class="mark">S</div><h1>SNIPER PAPER</h1></div><div class="paper-pill">Paper only</div></div>
+      <div class="universe-head"><span>Universe · UTC day</span><span class="count" id="universe-count">0</span></div>
+      <nav class="symbols" id="symbols" aria-label="Відібрані монети"></nav>
+      <div class="side-foot"><div id="side-health">Connecting</div><div id="last-update">—</div></div>
+    </aside>
+    <section class="workspace">
+      <header class="topbar">
+        <div class="instrument"><h2 id="instrument">—</h2><span class="last-price" id="last-price">—</span></div>
+        <div class="system-status"><span class="sys-chip" id="server-chip"><i class="dot"></i>Server <strong id="server-status">—</strong></span><span class="sys-chip" id="ws-chip"><i class="dot"></i>WebSocket <strong id="ws-status">—</strong></span><span class="sys-chip" id="books-chip"><i class="dot"></i>Books <strong id="books-status">—</strong></span><span class="sys-chip" id="db-chip"><i class="dot"></i>DB <strong id="db-status">—</strong></span><span class="sys-chip mode" id="mode">Observation</span><span class="sys-chip">UTC <strong id="clock">—</strong></span></div>
+      </header>
+      <main class="content">
+        <section class="chart-panel">
+          <div class="chart-toolbar"><div class="timeframes"><button class="tf" data-tf="1m">1m</button><button class="tf active" data-tf="5m">5m</button><button class="tf" data-tf="15m">15m</button><button class="tf" data-tf="4h">4h</button></div><div class="legend"><span>15m level</span><span>4h level</span><span>Paper SL / TP</span></div></div>
+          <div class="chart-wrap" id="chart-wrap"><canvas id="chart"></canvas><div class="level-list" id="level-list"></div><div class="chart-empty" id="chart-empty">Підключаю графік…</div></div>
+        </section>
+        <section class="trade-panel">
+          <div class="tabs" role="tablist"><button class="tab active" data-tab="paper">Paper trading<span class="tab-count" id="paper-count">0</span></button><button class="tab" data-tab="orders">Open orders<span class="tab-count" id="orders-count">0</span></button><button class="tab" data-tab="history">History<span class="tab-count" id="history-count">0</span></button></div>
+          <div class="tab-body"><div class="pane active" id="pane-paper"></div><div class="pane" id="pane-orders"></div><div class="pane" id="pane-history"></div></div>
+        </section>
+        <div class="footer-note">Public Bybit data · simulated fills · no order routing</div>
+      </main>
     </section>
-
-    <main class="grid">
-      <section class="panel third">
-        <h2>Service health</h2>
-        <div class="chips" id="service-health"></div>
-      </section>
-
-      <section class="panel third">
-        <h2>Data health</h2>
-        <div class="chips" id="data-health"></div>
-      </section>
-
-      <section class="panel third">
-        <h2>Lane P&amp;L</h2>
-        <div class="cards" id="lane-pnl"></div>
-      </section>
-
-      <section class="panel wide">
-        <h2>Current daily universe</h2>
-        <p class="section-note">The current UTC-day selection and why each market is in scope.</p>
-        <div id="universe"></div>
-      </section>
-
-      <section class="panel wide">
-        <h2>Active paper positions</h2>
-        <p class="section-note">Entry, stop, target, MFE, and MAE are surfaced directly for review.</p>
-        <div id="positions"></div>
-      </section>
-
-      <section class="panel wide">
-        <h2>Recent signals</h2>
-        <p class="section-note">Rejected and missed candidates remain visible as non-trades.</p>
-        <div id="signals"></div>
-      </section>
-    </main>
-
-    <div class="footer" id="footer"></div>
   </div>
-
   <script type="application/json" id="dashboard-payload">__DASHBOARD_PAYLOAD__</script>
   <script>
-    const payloadNode = document.getElementById('dashboard-payload');
-    const data = JSON.parse(payloadNode.textContent);
-
-    const badgeClass = (value) => {
-      const upper = String(value || '').toUpperCase();
-      if (/(OK|HEALTHY|READY|OPEN|ACTIVE|LIVE|GOOD|FILLED|SYNCED)/.test(upper)) return 'ok';
-      if (/(WAIT|WARN|STALE|DEGRADED|PENDING|MISSED|REJECTED|EMPTY)/.test(upper)) return 'warn';
-      if (/(BAD|FAIL|ERROR|DOWN|OFFLINE|BROKEN|MISS)/.test(upper)) return 'bad';
-      return '';
-    };
-
-    const esc = (value) => String(value ?? '')
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#39;');
-
-    const renderHealth = (items, target) => {
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No health items yet.</div>';
-        return;
-      }
-      target.innerHTML = items.map((item) => `
-        <div class="chip">
-          <div class="chip-header">
-            <span class="chip-label">${esc(item.label)}</span>
-            <span class="badge ${badgeClass(item.status)}">${esc(item.status)}</span>
-          </div>
-          ${item.detail ? `<div class="detail">${esc(item.detail)}</div>` : ''}
-        </div>
-      `).join('');
-    };
-
-    const renderMetricCards = (items, target) => {
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No lane P&amp;L yet.</div>';
-        return;
-      }
-      target.innerHTML = items.map((item) => `
-        <div class="card">
-          <div class="chip-header">
-            <span class="chip-label">${esc(item.lane)}</span>
-            <span class="badge ${badgeClass(item.pnl)}">${esc(item.pnl)}</span>
-          </div>
-          <div class="kv-grid">
-            <div class="kv"><span class="label">Trades</span><span class="value">${esc(item.trades || '—')}</span></div>
-            <div class="kv"><span class="label">Wins</span><span class="value">${esc(item.wins || '—')}</span></div>
-            <div class="kv"><span class="label">Losses</span><span class="value">${esc(item.losses || '—')}</span></div>
-          </div>
-        </div>
-      `).join('');
-    };
-
-    const renderTable = (items, target, columns) => {
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No rows yet.</div>';
-        return;
-      }
-
-      const head = columns.map((column) => `<span>${column}</span>`).join('');
-      const rows = items.map((item) => `
-        <div class="table-row">
-          <span class="row-label">${esc(item[0])}</span>
-          <span>${esc(item[1])}</span>
-          <span class="mono">${esc(item[2])}</span>
-          <span class="mono">${esc(item[3])}</span>
-          <span class="mono">${esc(item[4])}</span>
-          <span class="mono">${esc(item[5])}</span>
-        </div>
-      `).join('');
-      target.innerHTML = `<div class="table-head">${head}</div>${rows}`;
-    };
-
-    const renderUniverse = () => {
-      const items = data.current_universe || [];
-      const target = document.getElementById('universe');
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No current daily universe loaded yet.</div>';
-        return;
-      }
-      target.innerHTML = items.map((item) => `
-        <div class="row">
-          <div class="row-head">
-            <span class="row-label">${esc(item.symbol)}</span>
-            <span class="badge ${badgeClass(item.side)}">${esc(item.side || 'Scoped')}</span>
-          </div>
-          <div class="detail">${esc(item.reason || 'No rationale supplied.')}</div>
-          <div class="kv-grid">
-            <div class="kv"><span class="label">Timeframe</span><span class="value">${esc(item.timeframe || '—')}</span></div>
-            <div class="kv"><span class="label">Spread</span><span class="value">${esc(item.spread_bp || '—')}</span></div>
-            <div class="kv"><span class="label">Depth</span><span class="value">${esc(item.depth || '—')}</span></div>
-          </div>
-        </div>
-      `).join('');
-    };
-
-    const renderPositions = () => {
-      const items = data.active_positions || [];
-      const target = document.getElementById('positions');
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No active paper positions at the moment.</div>';
-        return;
-      }
-      target.innerHTML = `
-        <div class="table-head">
-          <span>Symbol</span>
-          <span>Side</span>
-          <span>Entry</span>
-          <span>SL / TP</span>
-          <span>MFE / MAE</span>
-          <span>Timing</span>
-        </div>
-        ${items.map((item) => `
-          <div class="table-row">
-            <span class="row-label">${esc(item.symbol)}</span>
-            <span class="badge ${badgeClass(item.side)}">${esc(item.side)}</span>
-            <span class="mono">${esc(item.entry || '—')}</span>
-            <span class="mono">${esc(item.stop || '—')} / ${esc(item.target || '—')}</span>
-            <span class="mono">${esc(item.mfe || '—')} / ${esc(item.mae || '—')}</span>
-            <span class="mono">${esc(item.opened_at || '—')}</span>
-          </div>
-        `).join('')}
-      `;
-    };
-
-    const renderSignals = () => {
-      const items = data.recent_signals || [];
-      const target = document.getElementById('signals');
-      if (!items.length) {
-        target.innerHTML = '<div class="empty">No recent signals yet.</div>';
-        return;
-      }
-      target.innerHTML = `
-        <div class="table-head">
-          <span>Time</span>
-          <span>Symbol</span>
-          <span>Lane</span>
-          <span>Outcome</span>
-          <span>Detail</span>
-          <span></span>
-        </div>
-        ${items.map((item) => `
-          <div class="table-row">
-            <span class="mono">${esc(item.timestamp)}</span>
-            <span class="row-label">${esc(item.symbol)}</span>
-            <span>${esc(item.lane)}</span>
-            <span class="badge ${badgeClass(item.outcome)}">${esc(item.outcome)}</span>
-            <span class="muted">${esc(item.detail || '—')}</span>
-            <span></span>
-          </div>
-        `).join('')}
-      `;
-    };
-
-    document.getElementById('last-update').textContent = data.last_update || '—';
-    document.getElementById('headline').textContent = data.headline || 'No headline supplied.';
-    document.getElementById('footer').textContent = `Snapshot generated at ${data.generated_at || '—'}.`;
-
-    renderHealth(data.service_health || [], document.getElementById('service-health'));
-    renderHealth(data.data_health || [], document.getElementById('data-health'));
-    renderMetricCards(data.lane_pnl || [], document.getElementById('lane-pnl'));
-    renderUniverse();
-    renderPositions();
-    renderSignals();
+    let overview=JSON.parse(document.getElementById('dashboard-payload').textContent),selected='',timeframe='5m',market=null;
+    const $=id=>document.getElementById(id),esc=v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+    function stateClass(ok,warn=false){return ok?'':warn?'warn':'bad'}
+    function renderSidebar(){const rows=overview.current_universe||[],changed=!rows.some(x=>x.symbol===selected);if(changed)selected=rows[0]?.symbol||'';$('universe-count').textContent=rows.length;$('symbols').innerHTML=rows.map((x,i)=>`<button class="symbol ${x.symbol===selected?'active':''}" data-symbol="${esc(x.symbol)}"><span class="symbol-name">${esc(x.symbol.replace('USDT',''))}<small class="symbol-metric"> / USDT</small></span><span class="symbol-rank">#${i+1}</span><span class="symbol-metric">${esc(x.spread_bp||'—')} spread</span><span class="symbol-metric">${esc(x.depth||'—')}</span></button>`).join('');document.querySelectorAll('.symbol').forEach(b=>b.onclick=()=>selectSymbol(b.dataset.symbol));if(changed&&selected){$('instrument').textContent=selected;queueMicrotask(loadMarket)}}
+    function renderHealth(){const service=(overview.service_health||[])[0]||{},books=(overview.data_health||[]).find(x=>x.label==='Market books')||{},ws=(overview.data_health||[]).find(x=>x.label==='WebSocket')||{},db=(overview.data_health||[]).find(x=>x.label==='SQLite journal')||{};const serverOk=service.status==='Healthy',booksOk=books.status==='Ready',wsOk=ws.status==='Connected',dbOk=db.status==='Fresh';$('server-status').textContent=service.status||'Waiting';$('ws-status').textContent=ws.status||'Waiting';$('books-status').textContent=books.detail||'—';$('db-status').textContent=db.status||'Waiting';$('server-chip').className=`sys-chip ${stateClass(serverOk,service.status==='Waiting')}`;$('ws-chip').className=`sys-chip ${stateClass(wsOk,ws.status==='Waiting')}`;$('books-chip').className=`sys-chip ${stateClass(booksOk,books.status==='Warming')}`;$('db-chip').className=`sys-chip ${stateClass(dbOk,db.status==='Stale')}`;$('side-health').textContent=`${service.status||'Waiting'} · ${ws.status||'WebSocket —'}`;$('last-update').textContent=`Updated ${overview.last_update||'—'}`;$('mode').textContent=(overview.headline||'').startsWith('Observation')?'Observation':'Paper active';$('clock').textContent=new Date().toISOString().slice(11,19)}
+    async function selectSymbol(symbol){selected=symbol;$('instrument').textContent=symbol;renderSidebar();await loadMarket()}
+    async function loadMarket(){if(!selected)return;$('chart-empty').hidden=false;$('chart-empty').textContent='Завантажую ринкові дані…';try{const r=await fetch(`/api/market?symbol=${encodeURIComponent(selected)}&timeframe=${timeframe}`,{cache:'no-store'});if(!r.ok)throw new Error();market=await r.json();renderMarket()}catch(e){market=null;$('chart-empty').textContent='Графік підключається до ринкових даних';drawChart()}}
+    function renderMarket(){const q=market.quote||{};$('last-price').textContent=q.mid?Number(q.mid).toLocaleString('en-US',{maximumFractionDigits:8}):market.last_price||'—';renderLevels();renderTabs();drawChart()}
+    function renderLevels(){$('level-list').innerHTML=(market?.levels||[]).map(l=>`<span class="level-chip">${esc(l.timeframe)} ${esc(l.level_class)} ${esc(l.side)} · ${Number(l.price).toPrecision(7)}</span>`).join('')}
+    function table(headers,rows){if(!rows.length)return '<div class="empty">Наразі записів немає</div>';return `<div class="table-wrap"><table class="table"><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`}
+    function renderTabs(){const positions=market?.positions||[],orders=market?.open_orders||[],history=market?.history||[];$('paper-count').textContent=positions.length;$('orders-count').textContent=orders.length;$('history-count').textContent=history.length;$('pane-paper').innerHTML=table(['Symbol','Side','Lane','Entry','SL','TP','MFE / MAE'],positions.map(x=>`<tr><td>${esc(x.symbol)}</td><td><span class="badge ${x.side.toLowerCase()}">${esc(x.side)}</span></td><td>${esc(x.lane)}</td><td>${esc(x.entry_price)}</td><td>${esc(x.stop_price)}</td><td>${esc(x.target_price)}</td><td>${esc(x.mfe_bp)} / ${esc(x.mae_bp)} bp</td></tr>`));$('pane-orders').innerHTML=table(['Time','Symbol','Type','Side','Price','Status'],orders.map(x=>`<tr><td>${esc(x.time)}</td><td>${esc(x.symbol)}</td><td>${esc(x.type)}</td><td>${esc(x.side)}</td><td>${esc(x.price)}</td><td><span class="badge ${String(x.status).toLowerCase()}">${esc(x.status)}</span></td></tr>`));$('pane-history').innerHTML=table(['Closed','Symbol','Lane','Side','Exit','Net P&L','Reason'],history.map(x=>`<tr><td>${esc(x.closed_at)}</td><td>${esc(x.symbol)}</td><td>${esc(x.lane)}</td><td>${esc(x.side)}</td><td>${esc(x.exit_price)}</td><td class="${Number(x.net_pnl)>=0?'pos':'neg'}">${esc(x.net_pnl)}</td><td>${esc(x.exit_reason)}</td></tr>`))}
+    function drawChart(){const canvas=$('chart'),box=$('chart-wrap').getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=Math.max(1,box.width*dpr);canvas.height=Math.max(1,box.height*dpr);const c=canvas.getContext('2d');c.scale(dpr,dpr);const W=box.width,H=box.height,bars=market?.bars||[];c.clearRect(0,0,W,H);if(!bars.length){$('chart-empty').hidden=false;return}$('chart-empty').hidden=true;const levels=market.levels||[],position=(market.positions||[]).find(p=>p.symbol===selected),vals=bars.flatMap(b=>[b.high,b.low]).concat(levels.map(l=>l.price));if(position)vals.push(position.stop_price,position.target_price,position.entry_price);let lo=Math.min(...vals),hi=Math.max(...vals),pad=(hi-lo)*.06||hi*.002;lo-=pad;hi+=pad;const y=p=>18+(hi-p)/(hi-lo)*(H-48),step=(W-58)/bars.length,body=Math.max(1,Math.min(7,step*.62));c.font='10px ui-monospace,monospace';let usedLabels=[];levels.forEach(l=>{const yy=y(l.price);c.strokeStyle=l.timeframe==='4h'?'#fbbf24':'#60a5fa';c.setLineDash([5,4]);c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke();if(!usedLabels.some(v=>Math.abs(v-yy)<13)){c.fillStyle=c.strokeStyle;c.fillText(`${l.timeframe} ${l.level_class} ${l.side} ${Number(l.price).toPrecision(7)}`,8,yy-4);usedLabels.push(yy)}});if(position)[['entry_price','#22d3ee','ENTRY'],['stop_price','#fb7185','SL'],['target_price','#34d399','TP']].forEach(([k,color,label])=>{const yy=y(Number(position[k]));c.strokeStyle=color;c.setLineDash([3,3]);c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke();c.fillStyle=color;c.fillText(`${label} ${position[k]}`,W-120,yy-4)});c.setLineDash([]);bars.forEach((b,i)=>{const x=46+i*step+step/2,up=b.close>=b.open,color=up?'#34d399':'#fb7185';c.strokeStyle=color;c.fillStyle=color;c.beginPath();c.moveTo(x,y(b.high));c.lineTo(x,y(b.low));c.stroke();const top=y(Math.max(b.open,b.close)),bottom=y(Math.min(b.open,b.close));c.fillRect(x-body/2,top,body,Math.max(1,bottom-top))});c.fillStyle='#718096';c.textAlign='right';for(let i=0;i<6;i++){const p=hi-(hi-lo)*i/5;c.fillText(p.toPrecision(7),W-4,y(p)+3)}c.textAlign='center';for(let i=0;i<5;i++){const idx=Math.round((bars.length-1)*i/4),x=46+idx*step+step/2,label=new Date(bars[idx].opened_at_ms).toISOString().slice(5,16).replace('T',' ');c.fillText(label,x,H-8)}c.textAlign='left'}
+    document.querySelectorAll('.tf').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tf').forEach(x=>x.classList.remove('active'));b.classList.add('active');timeframe=b.dataset.tf;loadMarket()});document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.pane').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(`pane-${b.dataset.tab}`).classList.add('active')});window.addEventListener('resize',()=>requestAnimationFrame(drawChart));renderHealth();renderSidebar();renderTabs();setInterval(()=>{$('clock').textContent=new Date().toISOString().slice(11,19)},1000);setInterval(async()=>{try{overview=await (await fetch('/api/snapshot',{cache:'no-store'})).json();renderHealth();renderSidebar();await loadMarket()}catch(e){}},10000);
   </script>
 </body>
 </html>

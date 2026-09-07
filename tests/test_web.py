@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from urllib import error, request
 
@@ -29,3 +30,23 @@ def test_nonloopback_bind_requires_explicit_opt_in(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
     with pytest.raises(ValueError, match="explicit"):
         dashboard_server(journal, "0.0.0.0", 0)
+
+
+def test_market_endpoint_uses_read_only_provider(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    calls = []
+
+    def provider(symbol: str, timeframe: str) -> dict:
+        calls.append((symbol, timeframe))
+        return {"symbol": symbol, "timeframe": timeframe, "bars": []}
+
+    server, thread = start_dashboard(journal, port=0, market_provider=provider)
+    host, port = server.server_address
+    try:
+        payload = json.loads(request.urlopen(f"http://{host}:{port}/api/market?symbol=BTCUSDT&timeframe=15m").read())
+        assert payload["symbol"] == "BTCUSDT"
+        assert calls == [("BTCUSDT", "15m")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

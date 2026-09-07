@@ -101,10 +101,10 @@ class DashboardTests(unittest.TestCase):
         html = render_dashboard_html(snapshot=snapshot, template_path=Path("src/sniper_paper/static/dashboard.html"))
 
         self.assertIn("Sniper Paper Dashboard", html)
-        self.assertIn("Current daily universe", html)
-        self.assertIn("Active paper positions", html)
-        self.assertIn("Recent signals", html)
-        self.assertIn("Lane P&amp;L", html)
+        self.assertIn("Universe · UTC day", html)
+        self.assertIn("Paper trading", html)
+        self.assertIn("Open orders", html)
+        self.assertIn("WebSocket", html)
         self.assertIn("Snapshot \\u003cready\\u003e", html)
         self.assertIn('"outcome":"REJECTED"', html)
 

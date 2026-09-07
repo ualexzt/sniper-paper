@@ -23,7 +23,11 @@ executable entry, TP/SL, costs, data quality, and restart state.
   paper positions, MFE/MAE, costs, P&L, and service events.
 - A stream break invalidates every book and any pending entry becomes `MISSED`;
   trading waits for a new snapshot and warmup.
-- The dashboard is read-only and exposes no order or mutation controls.
+- The read-only trading dashboard has a daily-universe sidebar, selectable
+  5m/15m/4h candlestick chart with causal 15m clusters, previous-day levels,
+  4h swings and paper brackets, plus Paper trading, Open orders and History
+  tabs. Its header reports server heartbeat, public WebSocket state and book
+  snapshot readiness; it exposes no order or mutation controls.
 
 ## Local verification
 

@@ -1,6 +1,13 @@
 from sniper_paper.market import Bar
 from sniper_paper.paper import Side
-from sniper_paper.strategy import CausalLevelEngine, Level, LevelSide, StrategyEvaluator, previous_utc_day_levels
+from sniper_paper.strategy import (
+    CausalLevelEngine,
+    Level,
+    LevelSide,
+    StrategyEvaluator,
+    current_display_levels,
+    previous_utc_day_levels,
+)
 
 
 def bar(tf: int, opened: int, o: float, h: float, l: float, c: float, delta: float = 1) -> Bar:
@@ -57,3 +64,15 @@ def test_previous_day_levels_are_not_known_before_day_boundary() -> None:
     assert {level.level_class for level in levels} == {"previous_day"}
     assert {level.side for level in levels} == {LevelSide.HIGH, LevelSide.LOW}
     assert all(level.confirmed_at_ms == 2 * day for level in levels)
+
+
+def test_display_levels_keep_4h_and_clustered_15m_not_single_pivots() -> None:
+    levels = [
+        Level("h4", "XUSDT", "4h", LevelSide.HIGH, 110, 1),
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 105.00, 1),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 105.05, 2),
+        Level("noise", "XUSDT", "15m", LevelSide.LOW, 97, 3),
+    ]
+    result = current_display_levels(levels, "XUSDT", 100, 10)
+    assert {level.level_class for level in result} == {"swing", "cluster"}
+    assert all(level.level_id != "noise" for level in result)

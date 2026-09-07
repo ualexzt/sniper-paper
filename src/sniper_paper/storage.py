@@ -257,6 +257,18 @@ class Journal:
                 (occurred_at_ms, severity, kind, message, _json(details or {})),
             )
 
+    def set_meta(self, key: str, value: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def get_meta(self, key: str) -> str | None:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return str(row[0]) if row else None
+
     def record_bar(self, timeframe: str, bar: Any, source: str) -> None:
         self.record_bars(timeframe, [bar], source)
 
@@ -311,6 +323,7 @@ class Journal:
             ).fetchall()
             last_event = db.execute("SELECT * FROM service_events ORDER BY occurred_at_ms DESC LIMIT 1").fetchone()
             recent_events = db.execute("SELECT * FROM service_events ORDER BY occurred_at_ms DESC LIMIT 50").fetchall()
+            meta = db.execute("SELECT key,value FROM meta").fetchall()
         universe_rows = []
         for row in universe:
             item = dict(row)
@@ -324,7 +337,16 @@ class Journal:
             "lane_pnl": [dict(row) for row in lane_pnl],
             "last_event": dict(last_event) if last_event else None,
             "recent_events": [dict(row) for row in recent_events],
+            "meta": {str(row["key"]): str(row["value"]) for row in meta},
         }
+
+    def position_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM positions WHERE status='CLOSED' ORDER BY closed_at_ms DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def open_position_row(self) -> dict[str, Any] | None:
         with self.connect() as db:

@@ -335,6 +335,20 @@ def _cluster_targets(levels: Sequence[Level], side: Side, tolerance_bp: float = 
     return result
 
 
+def current_display_levels(
+    levels: Iterable[Level], symbol: str, price: float, now_ms: int, limit: int = 8
+) -> list[Level]:
+    """Return the same structural level families that can become strategy targets."""
+    raw = [level for level in levels if level.symbol == symbol and level.confirmed_at_ms <= now_ms]
+    four_hour = [level for level in raw if level.timeframe == "4h"]
+    previous_day = [level for level in raw if level.timeframe == "15m" and level.level_class == "previous_day"]
+    fifteen_highs = [level for level in raw if level.timeframe == "15m" and level.side is LevelSide.HIGH]
+    fifteen_lows = [level for level in raw if level.timeframe == "15m" and level.side is LevelSide.LOW]
+    clustered = _cluster_targets(fifteen_highs, Side.LONG) + _cluster_targets(fifteen_lows, Side.SHORT)
+    unique = {level.level_id: level for level in four_hour + previous_day + clustered}
+    return sorted(unique.values(), key=lambda level: (abs(level.price - price), -level.confirmed_at_ms))[:limit]
+
+
 def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -> list[Level]:
     day_ms = 86_400_000
     today = now_ms // day_ms * day_ms

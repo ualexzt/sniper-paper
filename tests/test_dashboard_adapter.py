@@ -23,8 +23,10 @@ def test_dashboard_surfaces_observation_mode_and_book_readiness(tmp_path: Path) 
     )
     import time
 
+    journal.set_meta("stream_state", "connected")
     journal.event(time.time_ns() // 1_000_000, "INFO", "HEARTBEAT", "paper service healthy; books 1/1")
     result = journal_dashboard(journal)
     assert result["headline"].startswith("Observation only")
-    assert result["data_health"][0]["status"] == "Ready"
+    assert result["data_health"][0]["status"] == "Connected"
+    assert result["data_health"][1]["status"] == "Ready"
     assert result["current_universe"][0]["spread_bp"] == "1.25 bp"

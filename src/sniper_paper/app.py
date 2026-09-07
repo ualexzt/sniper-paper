@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +15,14 @@ from .market import Bar, BarBuilder, Book, Trade
 from .paper import PaperExecutor, Quote
 from .protocol import load_protocol, protocol_sha256
 from .storage import Journal
-from .strategy import CausalLevelEngine, Level, StrategyDecision, StrategyEvaluator, previous_utc_day_levels
+from .strategy import (
+    CausalLevelEngine,
+    Level,
+    StrategyDecision,
+    StrategyEvaluator,
+    current_display_levels,
+    previous_utc_day_levels,
+)
 from .stream import run_public_stream
 from .universe import DailyUniverseSelector
 from .web import start_dashboard
@@ -75,6 +82,7 @@ class PaperApp:
             self.journal.event(_now_ms(), "WARN", "RESTART_RECONCILE", f"marked {orphaned} pending triggers MISSED")
 
     async def run_forever(self) -> None:
+        self.journal.set_meta("stream_state", "disconnected")
         self.journal.event(_now_ms(), "INFO", "START", "paper service started", {"protocol_hash": self.protocol_hash})
         while True:
             try:
@@ -163,6 +171,7 @@ class PaperApp:
     async def handle_message(self, message: dict, received_at_ms: int) -> None:
         if message.get("op") == "connection":
             state = str(message.get("state", "unknown"))
+            self.journal.set_meta("stream_state", state)
             if state == "disconnected":
                 for symbol_state in self.states.values():
                     symbol_state.book.invalidate()
@@ -316,6 +325,73 @@ class PaperApp:
         except TimeoutError:
             stop.set()
 
+    def market_detail(self, symbol: str, timeframe: str) -> dict[str, Any]:
+        if timeframe not in TIMEFRAMES:
+            raise ValueError("unsupported timeframe")
+        state = self.states.get(symbol)
+        if state is None:
+            raise ValueError("symbol is not in the daily universe")
+        bars = state.bars[timeframe][-180:]
+        last_price = bars[-1].close if bars else None
+        levels = current_display_levels(state.levels, symbol, last_price, _now_ms()) if last_price is not None else []
+        quote: dict[str, float] | None = None
+        if state.book.ready:
+            bid, ask = state.book.best_bid, state.book.best_ask
+            quote = {"bid": bid, "ask": ask, "mid": (bid + ask) / 2}
+        positions = []
+        row = self.journal.open_position_row()
+        if row:
+            positions.append(row)
+        open_orders: list[dict[str, Any]] = []
+        if self.executor.pending:
+            pending = self.executor.pending
+            open_orders.append(
+                {
+                    "time": _stamp(pending.occurred_at_ms),
+                    "symbol": pending.symbol,
+                    "type": "ENTRY",
+                    "side": pending.side.value,
+                    "price": "next executable quote",
+                    "status": "TRIGGERED",
+                }
+            )
+        if row:
+            open_orders.extend(
+                [
+                    {
+                        "time": _stamp(int(row["opened_at_ms"])),
+                        "symbol": row["symbol"],
+                        "type": "STOP LOSS",
+                        "side": row["side"],
+                        "price": row["stop_price"],
+                        "status": "OPEN",
+                    },
+                    {
+                        "time": _stamp(int(row["opened_at_ms"])),
+                        "symbol": row["symbol"],
+                        "type": "TAKE PROFIT",
+                        "side": row["side"],
+                        "price": row["target_price"],
+                        "status": "OPEN",
+                    },
+                ]
+            )
+        history = []
+        for item in self.journal.position_history():
+            item["closed_at"] = _stamp(int(item["closed_at_ms"]))
+            history.append(item)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "bars": [asdict(bar) for bar in bars],
+            "levels": [asdict(level) for level in levels],
+            "quote": quote,
+            "last_price": last_price,
+            "positions": positions,
+            "open_orders": open_orders,
+            "history": history,
+        }
+
 
 def _parse_klines(symbol: str, timeframe: str, rows: list, now_ms: int) -> list[Bar]:
     milliseconds = TIMEFRAMES[timeframe]
@@ -348,13 +424,22 @@ def _now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def _stamp(value: int) -> str:
+    return datetime.fromtimestamp(value / 1000, UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
 def run(database: Path, dashboard_host: str, dashboard_port: int, *, allow_nonloopback_dashboard: bool = False) -> None:
     journal = Journal(database)
+    app = PaperApp(journal)
     dashboard, thread = start_dashboard(
-        journal, dashboard_host, dashboard_port, allow_nonloopback=allow_nonloopback_dashboard
+        journal,
+        dashboard_host,
+        dashboard_port,
+        allow_nonloopback=allow_nonloopback_dashboard,
+        market_provider=app.market_detail,
     )
     try:
-        asyncio.run(PaperApp(journal).run_forever())
+        asyncio.run(app.run_forever())
     finally:
         dashboard.shutdown()
         dashboard.server_close()

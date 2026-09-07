@@ -16,18 +16,14 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
     last = raw["last_event"]
     events = raw["recent_events"]
     heartbeat = next((item for item in events if item["kind"] == "HEARTBEAT"), None)
-    blocker = next((item for item in events if item["severity"] in {"WARN", "ERROR", "CRITICAL"}), None)
     heartbeat_fresh = bool(heartbeat and now_ms - int(heartbeat["occurred_at_ms"]) <= 90_000)
     book_match = re.search(r"books (\d+)/(\d+)", heartbeat["message"] if heartbeat else "")
     ready_books = int(book_match.group(1)) if book_match else 0
     total_books = int(book_match.group(2)) if book_match else 0
     books_ready = heartbeat_fresh and total_books > 0 and ready_books == total_books
+    websocket_connected = heartbeat_fresh and raw["meta"].get("stream_state") == "connected"
     service_status = "Healthy" if heartbeat_fresh else "Stale"
-    data_status = (
-        "Degraded"
-        if blocker and now_ms - int(blocker["occurred_at_ms"]) <= 90_000
-        else ("Fresh" if heartbeat_fresh else "Stale")
-    )
+    data_status = "Fresh" if heartbeat_fresh else "Stale"
     universe_source = raw["universe"][0]["source"] if raw["universe"] else {}
     observation_only = not bool(universe_source.get("evaluation_eligible", False))
     mode = "Observation only" if observation_only else "Forward paper evaluation"
@@ -44,6 +40,11 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
         ],
         "data_health": [
             {
+                "label": "WebSocket",
+                "status": "Connected" if websocket_connected else "Disconnected",
+                "detail": "Bybit public linear stream",
+            },
+            {
                 "label": "Market books",
                 "status": "Ready" if books_ready else ("Warming" if heartbeat_fresh else "Stale"),
                 "detail": f"{ready_books}/{total_books} snapshots ready",
@@ -51,7 +52,7 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
             {
                 "label": "SQLite journal",
                 "status": data_status,
-                "detail": blocker["message"] if data_status == "Degraded" else str(journal.path),
+                "detail": str(journal.path),
             },
         ],
         "current_universe": [

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .dashboard import render_dashboard_html
 from .dashboard_adapter import journal_dashboard
@@ -19,6 +21,7 @@ def dashboard_server(
     port: int = 8080,
     *,
     allow_nonloopback: bool = False,
+    market_provider: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
     if host not in {"127.0.0.1", "::1", "localhost"} and not allow_nonloopback:
         raise ValueError("non-loopback dashboard binding requires explicit allow_nonloopback")
@@ -30,6 +33,20 @@ def dashboard_server(
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", payload)
             elif self.path == "/api/snapshot":
                 payload = json.dumps(journal_dashboard(journal), separators=(",", ":")).encode()
+                self._send(HTTPStatus.OK, "application/json", payload)
+            elif self.path.startswith("/api/market?"):
+                query = parse_qs(urlsplit(self.path).query)
+                symbol = query.get("symbol", [""])[0]
+                timeframe = query.get("timeframe", ["5m"])[0]
+                if market_provider is None:
+                    self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json", b'{"error":"not ready"}')
+                    return
+                try:
+                    payload = json.dumps(market_provider(symbol, timeframe), separators=(",", ":")).encode()
+                except ValueError as exc:
+                    payload = json.dumps({"error": str(exc)}, separators=(",", ":")).encode()
+                    self._send(HTTPStatus.BAD_REQUEST, "application/json", payload)
+                    return
                 self._send(HTTPStatus.OK, "application/json", payload)
             elif self.path == "/healthz":
                 state = journal_dashboard(journal)
@@ -69,8 +86,9 @@ def start_dashboard(
     port: int = 8080,
     *,
     allow_nonloopback: bool = False,
+    market_provider: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> tuple[ThreadingHTTPServer, Thread]:
-    server = dashboard_server(journal, host, port, allow_nonloopback=allow_nonloopback)
+    server = dashboard_server(journal, host, port, allow_nonloopback=allow_nonloopback, market_provider=market_provider)
     thread = Thread(target=server.serve_forever, name="dashboard", daemon=True)
     thread.start()
     return server, thread
