@@ -24,7 +24,9 @@ re-entry are diagnostics only.
 1. Freeze `paper_strategy_v1.json` and hash it.
 2. Discover USDT perpetuals and build the once-daily selector with spread and
    depth gates.
-3. Subscribe to orderbook/trades for selected symbols and persist raw events.
+3. Subscribe to orderbook/trades for selected symbols; retain compact causal
+   bars, decisions, book-health events and restart evidence. Full raw depth is
+   deliberately left to the separate recorder so this server stays bounded.
 4. Build causal 1m/5m/15m/4h bars and horizontal level lifecycle.
 5. Implement both signal lanes with long/short mirrors.
 6. Implement executable paper entry, hard SL, target exit, costs and latency.

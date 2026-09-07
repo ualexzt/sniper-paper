@@ -1,0 +1,84 @@
+{
+  "name": "paper_strategy_v1",
+  "version": "v1",
+  "safety_boundary": {
+    "public_market_data_only": true,
+    "separate_server_and_repository": true,
+    "api_keys_allowed": false,
+    "authenticated_orders_allowed": false,
+    "paper_only": true,
+    "simulated_fills_only": true
+  },
+  "universe_policy": {
+    "cadence": "once_daily",
+    "timezone": "UTC",
+    "anchor_time_utc": "00:00:00Z",
+    "retroactive_additions_allowed": false
+  },
+  "market_data_policy": {
+    "required_timeframes": ["1m", "5m", "15m", "4h"],
+    "sources": ["orderbook", "trades"]
+  },
+  "execution_policy": {
+    "mode": "paper",
+    "one_attempt_per_setup": true,
+    "deterministic_take_profit": true,
+    "deterministic_stop_loss": true,
+    "include_fees": true,
+    "include_latency": true
+  },
+  "parameters": {
+    "universe": {
+      "max_symbols": 10,
+      "candidate_pool_multiplier": 4,
+      "max_spread_bps": 20.0,
+      "min_depth_notional_top5": 1000.0
+    },
+    "data_quality": {
+      "orderbook_depth": 50,
+      "max_book_age_ms": 1000,
+      "warmup_minutes_after_snapshot": 5
+    },
+    "strategy": {
+      "trend_lookback_4h": 6,
+      "min_trend_move_pct": 5.0,
+      "consolidation_bars_5m": 6,
+      "max_consolidation_width_bp": 250.0,
+      "trigger_lookback_1m": 3,
+      "min_book_imbalance": 0.05,
+      "min_reward_risk": 1.5,
+      "terminal_reward_risk": 2.0,
+      "stop_buffer_bp": 5.0
+    },
+    "paper": {
+      "initial_equity": 10000.0,
+      "risk_fraction": 0.001,
+      "daily_loss_fraction": 0.01,
+      "taker_fee_rate": 0.00055,
+      "slippage_bp": 2.0,
+      "latency_ms": 250
+    }
+  },
+  "lanes": [
+    {
+      "name": "early_target_hunt",
+      "target_timeframe": "4h",
+      "level_class": "higher_timeframe_target",
+      "exit_mode": "deterministic_tp_sl",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "manual_target_changes_allowed": false,
+      "re_entry_policy": "diagnostic_only"
+    },
+    {
+      "name": "terminal_level_breakout",
+      "target_timeframe": "15m",
+      "level_class": "final_target_breakout",
+      "exit_mode": "deterministic_tp_sl",
+      "direction": "both",
+      "attempts_per_setup": 1,
+      "manual_target_changes_allowed": false,
+      "re_entry_policy": "diagnostic_only"
+    }
+  ]
+}
