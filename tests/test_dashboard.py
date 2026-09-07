@@ -107,6 +107,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("WebSocket", html)
         self.assertIn('id="y-auto"', html)
         self.assertIn("futureBars", html)
+        self.assertNotIn('id="level-list"', html)
         self.assertIn("Snapshot \\u003cready\\u003e", html)
         self.assertIn('"outcome":"REJECTED"', html)
 
