@@ -10,6 +10,9 @@ for provenance. Paper outcomes must
 keep `REJECTED` and `MISSED` candidates distinct from trades and must record
 executable entry, TP/SL, costs, data quality, and restart state.
 
+For a plain-language Ukrainian explanation, see
+[`docs/STRATEGY_UA.md`](docs/STRATEGY_UA.md).
+
 ## What runs
 
 - A once-per-UTC-day selector ranks Bybit USDT linear perpetuals from public
