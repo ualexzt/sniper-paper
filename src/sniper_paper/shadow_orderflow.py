@@ -15,10 +15,10 @@ from .paper import Side
 from .strategy_v2 import Level, LevelSide
 
 __all__ = [
-    "ShadowStatus",
     "DensityWallEvidence",
     "ShadowDiagnostic",
     "ShadowOrderflowEvaluator",
+    "ShadowStatus",
 ]
 
 
