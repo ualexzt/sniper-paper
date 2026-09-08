@@ -20,7 +20,7 @@ from .market import Bar, BarBuilder, Book, Trade
 from .orderflow import DomTracker, Footprint
 from .paper import PaperExecutor, Quote
 from .paper import Side as PaperSide
-from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator
+from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator, ShadowStatus
 from .shadow_setups import RetestReclaimShadowEvaluator, ShadowSetupStatus
 from .storage import Journal
 from .strategy import (
@@ -594,7 +594,7 @@ class PaperApp:
                     "broken_at_ms": setup.broken_at_ms,
                     "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
                 }
-                self.journal.record_shadow_diagnostic(
+                self._record_shadow(
                     {
                         "diagnostic_id": setup.setup_id,
                         "setup_id": f"{state.symbol}:retest_reclaim_v1:{setup.level_id}:{setup.broken_at_ms}",
@@ -621,13 +621,16 @@ class PaperApp:
             bars=state.bars,
             levels=levels,
         )
-        if cascade.reason != "waiting_for_terminal_context":
+        if cascade.status is ShadowStatus.OBSERVED or cascade.reason in {
+            "blocked_no_causal_active_level",
+            "waiting_for_close_through",
+        }:
             record = cascade.to_record(self.protocol_hash)
             record["features"] = {
                 **dict(record["features"]),
                 "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
             }
-            self.journal.record_shadow_diagnostic(record)
+            self._record_shadow(record)
 
         expired_walls: list[tuple[str, float]] = []
         for key, wall in state.density_walls.items():
@@ -649,16 +652,30 @@ class PaperApp:
                 ),
                 levels=levels,
             )
-            record = diagnostic.to_record(self.protocol_hash)
-            record["features"] = {
-                **dict(record["features"]),
-                "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
+            persist_density = diagnostic.status is ShadowStatus.OBSERVED or diagnostic.reason in {
+                "blocked_ambiguous_wall_removal",
+                "wall_eroded_to_half",
+                "first_approach_already_consumed",
+                "wall_broken",
+                "touch_without_confirmation",
             }
-            self.journal.record_shadow_diagnostic(record)
+            if persist_density:
+                record = diagnostic.to_record(self.protocol_hash)
+                record["features"] = {
+                    **dict(record["features"]),
+                    "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
+                }
+                self._record_shadow(record)
             if now_ms - observed_at > 30 * 60_000 or wall["evidence_quality"] == "ambiguous":
                 expired_walls.append(key)
         for key in expired_walls:
             state.density_walls.pop(key, None)
+
+    def _record_shadow(self, record: dict[str, Any]) -> bool:
+        row = dict(record)
+        raw_id = f"{self.protocol_hash}|{record['diagnostic_id']}"
+        row["diagnostic_id"] = hashlib.sha256(raw_id.encode()).hexdigest()[:24]
+        return self.journal.record_shadow_diagnostic(row)
 
     @staticmethod
     def _atr(bars: list[Bar], period: int = 14) -> float:
@@ -816,7 +833,7 @@ class PaperApp:
         for item in self.journal.position_history():
             item["closed_at"] = _stamp(int(item["closed_at_ms"]))
             history.append(item)
-        shadow_diagnostics = self.journal.shadow_diagnostics(symbol, limit=50)
+        shadow_diagnostics = self.journal.shadow_diagnostics(symbol, limit=50, protocol_hash=self.protocol_hash)
         for item in shadow_diagnostics:
             item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
         return {

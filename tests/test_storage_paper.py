@@ -164,6 +164,7 @@ def test_shadow_diagnostic_is_idempotent_and_has_no_execution_link(tmp_path: Pat
     assert journal.record_shadow_diagnostic(row) is False
     assert Journal(database).record_shadow_diagnostic(row) is False
     assert journal.shadow_diagnostics("BTCUSDT") == [{**row, "features": {"level_id": "broken-1"}}]
+    assert journal.shadow_diagnostics("BTCUSDT", protocol_hash="other") == []
 
     with journal.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0

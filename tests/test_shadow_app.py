@@ -6,6 +6,7 @@ from pathlib import Path
 from sniper_paper.app import PaperApp, SymbolState
 from sniper_paper.market import Bar
 from sniper_paper.paper import Side as PaperSide
+from sniper_paper.shadow_orderflow import ShadowOrderflowEvaluator
 from sniper_paper.shadow_setups import (
     RetestReclaimShadowSetup,
     ShadowSetupPhase,
@@ -203,7 +204,7 @@ def test_market_detail_exposes_symbol_scoped_shadow_diagnostics(tmp_path: Path) 
             "reference_price": 100.0,
             "stop_price": 99.0,
             "target_price": 105.0,
-            "protocol_hash": "shadow",
+            "protocol_hash": app.protocol_hash,
             "features": {"level_id": "l1"},
         }
     )
@@ -220,7 +221,7 @@ def test_market_detail_exposes_symbol_scoped_shadow_diagnostics(tmp_path: Path) 
             "reference_price": 200.0,
             "stop_price": 199.0,
             "target_price": 205.0,
-            "protocol_hash": "shadow",
+            "protocol_hash": app.protocol_hash,
             "features": {"level_id": "l2"},
         }
     )
@@ -229,3 +230,24 @@ def test_market_detail_exposes_symbol_scoped_shadow_diagnostics(tmp_path: Path) 
 
     assert {row["symbol"] for row in result["shadow_diagnostics"]} == {"BTCUSDT"}
     assert result["shadow_diagnostics"][0]["features"] == {"level_id": "l1"}
+
+
+def test_non_actionable_shadow_warmup_rows_are_not_persisted(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    state = SymbolState("BTCUSDT", tick_size=0.01)
+    state.bars["1m"] = [Bar("BTCUSDT", 60_000, 0, 60_000, 100.0, 100.1, 99.9, 100.0, 1.0, 0.0, 1)]
+    state.density_walls[("ask", 105.0)] = {
+        "side": "ask",
+        "price": 105.0,
+        "observed_at_ms": 1,
+        "initial_size": 100.0,
+        "current_remaining": 100.0,
+        "source_event_id": "wall-1",
+        "evidence_quality": "observed",
+    }
+    app.shadow_retests = {}
+    app.shadow_orderflow = {"BTCUSDT": ShadowOrderflowEvaluator(tick_size=0.01)}
+
+    app._evaluate_shadow(state, [], 60_000)
+
+    assert app.journal.shadow_diagnostics("BTCUSDT") == []

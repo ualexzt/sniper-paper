@@ -288,7 +288,9 @@ class ShadowOrderflowEvaluator:
                 lane=lane,
                 setup_id=setup_id,
                 now_ms=now_ms,
+                side=wall.side,
                 reason="blocked_ambiguous_wall_removal",
+                reference_price=wall.price,
                 features={"evidence_quality": wall.evidence_quality},
             )
         if wall.wall_age_ms is None:

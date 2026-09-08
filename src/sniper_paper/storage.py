@@ -395,21 +395,30 @@ class Journal:
             )
         return cursor.rowcount == 1
 
-    def shadow_diagnostics(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def shadow_diagnostics(
+        self,
+        symbol: str | None = None,
+        limit: int = 100,
+        *,
+        protocol_hash: str | None = None,
+    ) -> list[dict[str, Any]]:
         if limit < 1:
             return []
         with self.connect() as db:
-            if symbol is None:
-                rows = db.execute(
-                    "SELECT * FROM shadow_diagnostics ORDER BY occurred_at_ms DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            else:
-                rows = db.execute(
-                    """SELECT * FROM shadow_diagnostics
-                       WHERE symbol=? ORDER BY occurred_at_ms DESC LIMIT ?""",
-                    (symbol, limit),
-                ).fetchall()
+            clauses = []
+            values: list[Any] = []
+            if symbol is not None:
+                clauses.append("symbol=?")
+                values.append(symbol)
+            if protocol_hash is not None:
+                clauses.append("protocol_hash=?")
+                values.append(protocol_hash)
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            values.append(limit)
+            rows = db.execute(
+                f"SELECT * FROM shadow_diagnostics{where} ORDER BY occurred_at_ms DESC LIMIT ?",
+                values,
+            ).fetchall()
         result = []
         for row in rows:
             item = dict(row)
