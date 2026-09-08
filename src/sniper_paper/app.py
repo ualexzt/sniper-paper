@@ -665,13 +665,23 @@ class PaperApp:
                 ),
                 levels=levels,
             )
-            persist_density = diagnostic.status is ShadowStatus.OBSERVED or diagnostic.reason in {
-                "blocked_ambiguous_wall_removal",
-                "wall_eroded_to_half",
-                "first_approach_already_consumed",
-                "wall_broken",
-                "touch_without_confirmation",
-            }
+            completed_touch = any(
+                bar.closed_at_ms <= now_ms
+                and bar.closed_at_ms >= observed_at
+                and bar.low <= float(wall["price"]) <= bar.high
+                for bar in (state.bars["15s"] or state.bars["1m"])
+            )
+            persist_density = diagnostic.status is ShadowStatus.OBSERVED or (
+                completed_touch
+                and diagnostic.reason
+                in {
+                    "blocked_ambiguous_wall_removal",
+                    "wall_eroded_to_half",
+                    "first_approach_already_consumed",
+                    "wall_broken",
+                    "touch_without_confirmation",
+                }
+            )
             if persist_density:
                 record = diagnostic.to_record(self.protocol_hash)
                 record["features"] = {

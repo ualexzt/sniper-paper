@@ -347,3 +347,25 @@ def test_retest_before_shadow_start_is_not_backfilled(tmp_path: Path) -> None:
     app._evaluate_shadow(state, [], 240_000)
 
     assert app.journal.shadow_diagnostics("BTCUSDT") == []
+
+
+def test_untouched_density_terminal_is_not_persisted(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    state = SymbolState("BTCUSDT", tick_size=0.01, shadow_active=True)
+    state.bars["15s"] = [Bar("BTCUSDT", 15_000, 0, 15_000, 100.0, 101.0, 99.0, 100.0, 1.0, 0.0, 1)]
+    state.density_walls[("ask", 105.0)] = {
+        "side": "ask",
+        "price": 105.0,
+        "observed_at_ms": 1,
+        "initial_size": 100.0,
+        "current_remaining": 0.0,
+        "source_event_id": "untouched-wall",
+        "evidence_quality": "ambiguous",
+    }
+    app.shadow_retests = {}
+    app.shadow_orderflow = {"BTCUSDT": ShadowOrderflowEvaluator(tick_size=0.01)}
+
+    app._evaluate_shadow(state, [], 15_000)
+
+    assert state.density_walls == {}
+    assert app.journal.shadow_diagnostics("BTCUSDT") == []
