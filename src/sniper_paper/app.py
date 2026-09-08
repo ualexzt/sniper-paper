@@ -69,6 +69,7 @@ class SymbolState:
     last_orderflow: dict[str, Any] | None = None
     last_dom_events: list[dict[str, Any]] = field(default_factory=list)
     density_walls: dict[tuple[str, float], dict[str, Any]] = field(default_factory=dict)
+    shadow_active: bool = False
     last_blocker: str | None = None
     orderflow_ready: bool = False
     recorded_decisions: set[str] = field(default_factory=set)
@@ -313,6 +314,7 @@ class PaperApp:
                     symbol_state.last_blocker = "stream_disconnected"
                     symbol_state.orderflow_ready = False
                     symbol_state.density_walls.clear()
+                    symbol_state.shadow_active = False
                 self.executor.cancel_pending("market_stream_disconnected", received_at_ms)
                 detail = {"error": str(message.get("error", "")), "open_position": bool(self.executor.position)}
                 self.journal.event(
@@ -334,6 +336,7 @@ class PaperApp:
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
                     state.snapshot_received_at_ms = received_at_ms
                     state.density_walls.clear()
+                    state.shadow_active = False
                 wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
                 completed_footprints: list[dict[str, Any]] = []
                 if self.footprint is not None:
@@ -556,6 +559,8 @@ class PaperApp:
             key = (side, price)
             kind = str(event.get("type", ""))
             if kind == "wall_persistent":
+                if key not in state.density_walls and any(existing_side == side for existing_side, _ in state.density_walls):
+                    continue
                 observed_at = int(event.get("first_candidate_at_ms", event.get("received_ms", 0)))
                 state.density_walls[key] = {
                     "side": side,
@@ -575,6 +580,10 @@ class PaperApp:
 
     def _evaluate_shadow(self, state: SymbolState, levels: list[V2Level], now_ms: int) -> None:
         shadow_evaluation_eligible = self.shadow_started_at_ms <= (now_ms // 86_400_000) * 86_400_000 + 300_000
+        if not state.shadow_active:
+            # Pre-ready walls are observation-only and cannot seed a forward setup.
+            state.density_walls.clear()
+            state.shadow_active = True
         retest_evaluator = self.shadow_retests.get(state.symbol)
         if retest_evaluator is not None:
             for setup in retest_evaluator.evaluate(
@@ -583,7 +592,11 @@ class PaperApp:
                 bars=state.bars,
                 levels=state.levels,
             ):
-                if setup.broken_at_ms is None or setup.status is ShadowSetupStatus.REJECTED:
+                if (
+                    setup.broken_at_ms is None
+                    or setup.broken_at_ms < self.shadow_started_at_ms
+                    or setup.status is ShadowSetupStatus.REJECTED
+                ):
                     continue
                 occurred_at = setup.reclaim_at_ms or setup.invalidated_at_ms or setup.retest_at_ms or setup.broken_at_ms
                 features = {

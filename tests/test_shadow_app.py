@@ -135,6 +135,7 @@ def test_update_density_walls_snapshot_lifecycle(tmp_path: Path) -> None:
 
 def test_evaluate_shadow_writes_only_shadow_diagnostics(tmp_path: Path) -> None:
     app = _app(tmp_path)
+    app.shadow_started_at_ms = 0
     state = SymbolState("BTCUSDT")
     state.bars["1m"] = [Bar("BTCUSDT", 60_000, 0, 60_000, 99.0, 101.0, 98.5, 100.2, 1.0, 0.0, 1)]
     state.levels = [Level("l1", "BTCUSDT", "15m", LevelSide.HIGH, 100.0, 0, broken_at_ms=60_000)]
@@ -249,5 +250,100 @@ def test_non_actionable_shadow_warmup_rows_are_not_persisted(tmp_path: Path) -> 
     app.shadow_orderflow = {"BTCUSDT": ShadowOrderflowEvaluator(tick_size=0.01)}
 
     app._evaluate_shadow(state, [], 60_000)
+
+    assert app.journal.shadow_diagnostics("BTCUSDT") == []
+
+
+def test_shadow_activation_discards_prewarm_walls(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    state = SymbolState("BTCUSDT", tick_size=0.01)
+    state.density_walls[("bid", 100.0)] = {
+        "side": "bid",
+        "price": 100.0,
+        "observed_at_ms": 1,
+        "initial_size": 100.0,
+        "current_remaining": 0.0,
+        "source_event_id": "prewarm-wall",
+        "evidence_quality": "ambiguous",
+    }
+    app.shadow_retests = {}
+    app.shadow_orderflow = {"BTCUSDT": ShadowOrderflowEvaluator(tick_size=0.01)}
+
+    app._evaluate_shadow(state, [], 60_000)
+
+    assert state.shadow_active is True
+    assert state.density_walls == {}
+    assert app.journal.shadow_diagnostics("BTCUSDT") == []
+
+
+def test_density_tracking_keeps_only_first_candidate_per_side() -> None:
+    state = SymbolState("BTCUSDT", tick_size=0.01)
+
+    PaperApp._update_density_walls(
+        state,
+        [
+            {
+                "type": "wall_persistent",
+                "side": "bid",
+                "price": 100.0,
+                "quantity": 10.0,
+                "received_ms": 1_000,
+                "first_candidate_at_ms": 900,
+            },
+            {
+                "type": "wall_persistent",
+                "side": "bid",
+                "price": 99.0,
+                "quantity": 20.0,
+                "received_ms": 1_000,
+                "first_candidate_at_ms": 950,
+            },
+            {
+                "type": "wall_persistent",
+                "side": "ask",
+                "price": 101.0,
+                "quantity": 15.0,
+                "received_ms": 1_000,
+                "first_candidate_at_ms": 925,
+            },
+        ],
+    )
+
+    assert set(state.density_walls) == {("bid", 100.0), ("ask", 101.0)}
+
+
+def test_retest_before_shadow_start_is_not_backfilled(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    app.shadow_started_at_ms = 200_000
+    state = SymbolState("BTCUSDT")
+    app.shadow_retests = {
+        "BTCUSDT": _FakeRetestEvaluator(
+            [
+                RetestReclaimShadowSetup(
+                    setup_id="historical-setup",
+                    symbol="BTCUSDT",
+                    lane="retest_reclaim_v1",
+                    side=PaperSide.LONG,
+                    level_id="historical-level",
+                    level_timeframe="15m",
+                    level_price=100.0,
+                    level_confirmed_at_ms=0,
+                    broken_at_ms=100_000,
+                    retest_at_ms=120_000,
+                    reclaim_at_ms=140_000,
+                    invalidated_at_ms=None,
+                    status=ShadowSetupStatus.CONFIRMED,
+                    phase=ShadowSetupPhase.RECLAIMED,
+                    reason="reclaimed",
+                    entry_price=101.0,
+                    stop_price=99.0,
+                    target_price=105.0,
+                )
+            ]
+        )
+    }
+    app.shadow_orderflow = {}
+
+    app._evaluate_shadow(state, [], 240_000)
 
     assert app.journal.shadow_diagnostics("BTCUSDT") == []

@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen specification version: v2.2.1, dated 2026-09-08.
+Frozen specification version: v2.2.2, dated 2026-09-08.
 
 This document defines the paper-only v2 evaluator foundation. It does not place
 orders, does not depend on the live app parser, and only consumes immutable
