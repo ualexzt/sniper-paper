@@ -1,6 +1,6 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.1",
+  "version": "v2.1.1",
   "status": "frozen_spec",
   "safety_boundary": {
     "public_market_data_only": true,

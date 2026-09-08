@@ -301,6 +301,26 @@ def test_nearest_target_skips_levels_broken_as_of_evaluation_time() -> None:
     assert target.level_id == "active"
 
 
+def test_failed_sweep_lane_cannot_reuse_broken_structural_level() -> None:
+    fixture = build_failed_sweep_fixture()
+    broken_levels = [replace(fixture["levels"][0], broken_at_ms=900_000)]
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+
+    result = decision(
+        evaluator.evaluate(
+            symbol="XUSDT",
+            now_ms=fixture["arm_now"],
+            bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
+            levels=broken_levels,
+            orderflow=fixture["arm_frame"],
+        ),
+        LaneName.FAILED_SWEEP_RECLAIM.value,
+    )
+
+    assert result.status == DecisionStatus.REJECTED.value
+    assert result.reason == "no_sweep_setup"
+
+
 def test_failed_sweep_is_symmetric() -> None:
     long_fixture = build_failed_sweep_fixture()
     short_fixture = {

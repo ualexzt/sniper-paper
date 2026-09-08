@@ -391,7 +391,13 @@ class StrategyV2Evaluator:
         orderflow: OrderflowFrame,
     ) -> list[StrategyDecision]:
         completed = {timeframe: _completed(sequence, now_ms) for timeframe, sequence in bars.items()}
-        level_list = [level for level in levels if level.symbol == symbol and level.confirmed_at_ms <= now_ms]
+        level_list = [
+            level
+            for level in levels
+            if level.symbol == symbol
+            and level.confirmed_at_ms <= now_ms
+            and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
+        ]
         if orderflow.symbol != symbol or orderflow.received_at_ms > now_ms:
             return [
                 self._reject(
