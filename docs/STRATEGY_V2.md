@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen specification version: v2.1.1, dated 2026-09-08.
+Frozen specification version: v2.2.0, dated 2026-09-08.
 
 This document defines the paper-only v2 evaluator foundation. It does not place
 orders, does not depend on the live app parser, and only consumes immutable
@@ -129,6 +129,27 @@ same consolidation context.
 `fresh_extreme_momentum` are tradable hypotheses with conservative defaults.
 
 `dom_confirmed_breakout` and `diagonal_context` remain diagnostic only.
+
+## Shadow diagnostics
+
+Version v2.2 adds three observation-only hypotheses:
+
+- `retest_reclaim_v1` observes a causal close-based level break, a later
+  first retest on completed 1m bars, and a subsequent break of the retest
+  reaction range. Its stop and nearest-liquidity target are measurements, not
+  executable instructions.
+- `density_bounce_v1` requires a persistent public-book wall with observable
+  age, initial size, and remaining size. Missing fields and ambiguous removal
+  fail closed. A remaining ratio at or below 0.5 invalidates the observation.
+- `cascade_terminal_exit` measures strong completed 1m impulse bars against
+  levels that were causal before the impulse bar closed.
+
+These rows are persisted only in `shadow_diagnostics`. They never create a
+`StrategySignal`, never enter `signals`, and have no path to `paper_orders` or
+`positions`. Stable diagnostic identifiers provide restart-safe deduplication.
+The first partial UTC day after a new protocol deployment is retained for
+observation but marked `evaluation_eligible=false`; complete-day evaluation
+starts from the next UTC anchor.
 
 ## Unvalidated Hypotheses
 

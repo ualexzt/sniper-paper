@@ -312,7 +312,11 @@ class Footprint:
             previous_price: Decimal | None = None
             for item in rows:
                 item_price = Decimal(item["price"])
-                ok = item["diagnostic_diagonal_buy_imbalance"] if side == "buy" else item["diagnostic_diagonal_sell_imbalance"]
+                ok = (
+                    item["diagnostic_diagonal_buy_imbalance"]
+                    if side == "buy"
+                    else item["diagnostic_diagonal_sell_imbalance"]
+                )
                 if previous_price is not None and item_price - previous_price != self.ticks[bucket["symbol"]]:
                     if len(run) >= self.stack_levels:
                         stacks.append({"kind": "diagonal", "side": side, "prices": run})
@@ -484,6 +488,9 @@ class DomTracker:
             "evidence_label": evidence_label,
             "feed_readiness": asdict(readiness),
         }
+        if first is not None:
+            event["first_candidate_at_ms"] = first
+            event["wall_age_ms"] = received - first
         if typ == "level_removed":
             event["removal_attribution"] = "unknown_execution_or_cancel_or_visibility"
         if old_qty is not None:
@@ -498,7 +505,9 @@ class DomTracker:
                 if qty > 0 and price * qty >= threshold:
                     state["first_candidate"][(side, price)] = received
 
-    def _persistent_events(self, symbol: str, row: dict[str, Any], state: dict[str, Any], readiness: FeedReadiness) -> list[dict[str, Any]]:
+    def _persistent_events(
+        self, symbol: str, row: dict[str, Any], state: dict[str, Any], readiness: FeedReadiness
+    ) -> list[dict[str, Any]]:
         received = _received_ms(row)
         live: set[tuple[str, Decimal]] = set()
         events = []
@@ -511,7 +520,9 @@ class DomTracker:
                 live.add(key)
                 first = state["first_candidate"].setdefault(key, received)
                 if received - first >= self.persistence_ms and key not in state["persistent_emitted"]:
-                    event = self._event("wall_persistent", symbol, side, price, row, state, qty, qty, readiness=readiness)
+                    event = self._event(
+                        "wall_persistent", symbol, side, price, row, state, qty, qty, readiness=readiness
+                    )
                     event["wall_persistent"] = True
                     event["uncertainty"] = "observed"
                     events.append(event)

@@ -1,6 +1,6 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.1.1",
+  "version": "v2.2.0",
   "status": "frozen_spec",
   "safety_boundary": {
     "public_market_data_only": true,
@@ -19,6 +19,12 @@
   "market_data_policy": {
     "required_timeframes": ["15s", "1m", "5m", "15m", "4h"],
     "sources": ["orderbook", "trades"]
+  },
+  "shadow_diagnostics_policy": {
+    "enabled": true,
+    "execution_link_allowed": false,
+    "persist_separately_from_signals": true,
+    "lanes": ["retest_reclaim_v1", "density_bounce_v1", "cascade_terminal_exit"]
   },
   "execution_policy": {
     "mode": "paper",
@@ -72,6 +78,13 @@
       "cascade_min_body_to_range": 0.6,
       "cascade_min_delta_ratio": 2.0,
       "fresh_extreme_lookback_4h": 6
+    },
+    "shadow": {
+      "retest_tolerance_ticks": 1,
+      "reclaim_buffer_ticks": 1,
+      "max_retest_age_ms": 1800000,
+      "min_wall_age_ms": 1000,
+      "wall_failure_remaining_ratio": 0.5
     },
     "paper": {
       "initial_equity": 10000.0,
@@ -168,6 +181,7 @@
     "early_target_hunt arms on trend plus consolidation and defers execution to target_seeking_breakout.",
     "target_seeking_breakout is the executable breakout continuation for the same consolidation context.",
     "structural_reaction, cascade_impulse, and fresh_extreme_momentum are conservative v2-only hypotheses that still obey one-attempt and causal expiry rules.",
-    "dom_confirmed_breakout and diagonal_context are diagnostic and must never emit tradable signals."
+    "dom_confirmed_breakout and diagonal_context are diagnostic and must never emit tradable signals.",
+    "retest_reclaim_v1, density_bounce_v1, and cascade_terminal_exit persist only to shadow_diagnostics and have no execution path."
   ]
 }

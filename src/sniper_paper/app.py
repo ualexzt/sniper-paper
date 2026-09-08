@@ -19,6 +19,9 @@ from .bybit_public import BybitPublicClient
 from .market import Bar, BarBuilder, Book, Trade
 from .orderflow import DomTracker, Footprint
 from .paper import PaperExecutor, Quote
+from .paper import Side as PaperSide
+from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator
+from .shadow_setups import RetestReclaimShadowEvaluator, ShadowSetupStatus
 from .storage import Journal
 from .strategy import (
     CausalLevelEngine,
@@ -65,6 +68,7 @@ class SymbolState:
     snapshot_received_at_ms: int | None = None
     last_orderflow: dict[str, Any] | None = None
     last_dom_events: list[dict[str, Any]] = field(default_factory=list)
+    density_walls: dict[tuple[str, float], dict[str, Any]] = field(default_factory=dict)
     last_blocker: str | None = None
     orderflow_ready: bool = False
     recorded_decisions: set[str] = field(default_factory=set)
@@ -82,6 +86,12 @@ class PaperApp:
         orphaned = self.journal.reconcile_orphaned_triggers()
         self.protocol_data = json.loads(V2_PROTOCOL_PATH.read_text(encoding="utf-8"))
         self.protocol_hash = hashlib.sha256(V2_PROTOCOL_PATH.read_bytes()).hexdigest()
+        shadow_start_key = f"shadow_started_at_ms:{self.protocol_hash}"
+        shadow_start = self.journal.get_meta(shadow_start_key)
+        if shadow_start is None:
+            shadow_start = str(_now_ms())
+            self.journal.set_meta(shadow_start_key, shadow_start)
+        self.shadow_started_at_ms = int(shadow_start)
         params = self.protocol_data["parameters"]
         self.selector = DailyUniverseSelector(
             self.client,
@@ -91,6 +101,8 @@ class PaperApp:
             min_depth_notional_top5=str(params["universe"]["min_depth_notional_top5"]),
         )
         self.strategies: dict[str, StrategyV2Evaluator] = {}
+        self.shadow_retests: dict[str, RetestReclaimShadowEvaluator] = {}
+        self.shadow_orderflow: dict[str, ShadowOrderflowEvaluator] = {}
         self.restored_setup_ids = self.journal.attempted_setup_ids()
         self.executor = PaperExecutor(
             journal,
@@ -203,7 +215,10 @@ class PaperApp:
         invalid_meta = [
             symbol
             for symbol in symbols
-            if any(float(symbol_meta.get(symbol, {}).get(key) or 0) <= 0 for key in ("tick_size", "qty_step", "min_order_qty"))
+            if any(
+                float(symbol_meta.get(symbol, {}).get(key) or 0) <= 0
+                for key in ("tick_size", "qty_step", "min_order_qty")
+            )
         ]
         if invalid_meta:
             raise RuntimeError(f"missing positive public instrument metadata: {invalid_meta}")
@@ -217,9 +232,12 @@ class PaperApp:
             for symbol in symbols
         }
         strategy_params = self.protocol_data["parameters"]["strategy"]
+        shadow_params = self.protocol_data["parameters"]["shadow"]
         execution = self.protocol_data["execution_policy"]
         quality = self.protocol_data["parameters"]["data_quality"]
         self.strategies = {}
+        self.shadow_retests = {}
+        self.shadow_orderflow = {}
         for symbol, state in self.states.items():
             evaluator = StrategyV2Evaluator(
                 **{**strategy_params, "tick_size": state.tick_size},
@@ -229,16 +247,31 @@ class PaperApp:
                 cooldown_ms=int(execution["cooldown_ms"]),
                 max_book_age_ms=int(quality["max_book_age_ms"]),
                 max_spread_bp=float(self.protocol_data["parameters"]["universe"]["max_spread_bps"]),
-                min_depth_notional_top5=float(
-                    self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"]
-                ),
+                min_depth_notional_top5=float(self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"]),
             )
             evaluator.restore_attempts(self.restored_setup_ids)
             self.strategies[symbol] = evaluator
+            self.shadow_retests[symbol] = RetestReclaimShadowEvaluator(
+                tick_size=state.tick_size,
+                fast_timeframe=self.level_break_fast_timeframe,
+                fast_confirming_closes=self.level_break_fast_closes,
+                source_confirming_closes=self.level_break_source_closes,
+                break_buffer_ticks=self.level_break_buffer_ticks,
+                retest_tolerance_ticks=int(shadow_params["retest_tolerance_ticks"]),
+                reclaim_buffer_ticks=int(shadow_params["reclaim_buffer_ticks"]),
+                max_setup_age_ms=int(shadow_params["max_retest_age_ms"]),
+            )
+            self.shadow_orderflow[symbol] = ShadowOrderflowEvaluator(
+                tick_size=state.tick_size,
+                min_wall_age_ms=int(shadow_params["min_wall_age_ms"]),
+                wall_failure_remaining_ratio=float(shadow_params["wall_failure_remaining_ratio"]),
+                min_cascade_body_to_range=float(strategy_params["cascade_min_body_to_range"]),
+                min_cascade_delta_ratio=float(strategy_params["cascade_min_delta_ratio"]),
+                stop_buffer_bp=float(strategy_params["stop_buffer_bp"]),
+            )
         tick_sizes = {symbol: str(state.tick_size) for symbol, state in self.states.items()}
         wall_thresholds = {
-            symbol: str(self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"])
-            for symbol in symbols
+            symbol: str(self.protocol_data["parameters"]["universe"]["min_depth_notional_top5"]) for symbol in symbols
         }
         self.footprint = Footprint(tick_sizes, warmup_ms=self.warmup_ms)
         self.dom = DomTracker(wall_thresholds, warmup_ms=self.warmup_ms)
@@ -279,6 +312,7 @@ class PaperApp:
                     symbol_state.snapshot_received_at_ms = None
                     symbol_state.last_blocker = "stream_disconnected"
                     symbol_state.orderflow_ready = False
+                    symbol_state.density_walls.clear()
                 self.executor.cancel_pending("market_stream_disconnected", received_at_ms)
                 detail = {"error": str(message.get("error", "")), "open_position": bool(self.executor.position)}
                 self.journal.event(
@@ -299,12 +333,15 @@ class PaperApp:
                 state.book.apply(message, received_at_ms)
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
                     state.snapshot_received_at_ms = received_at_ms
+                    state.density_walls.clear()
                 wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
                 completed_footprints: list[dict[str, Any]] = []
                 if self.footprint is not None:
                     completed_footprints = self.footprint.process(wrapped)
                 if self.dom is not None:
-                    state.last_dom_events = self.dom.process(wrapped)[-20:]
+                    dom_events = self.dom.process(wrapped)
+                    self._update_density_walls(state, dom_events)
+                    state.last_dom_events = [*state.last_dom_events, *dom_events][-20:]
                 self.executor.on_quote(symbol, self._quote(state, received_at_ms))
                 for footprint in completed_footprints:
                     self._complete_footprint(footprint, received_at_ms)
@@ -407,7 +444,9 @@ class PaperApp:
             if state.snapshot_received_at_ms is None
             else max(0, state.snapshot_received_at_ms + self.warmup_ms - now_ms)
         )
-        book_ready = state.book.healthy(now_ms, self.max_book_age_ms, float(self.protocol_data["parameters"]["universe"]["max_spread_bps"]))
+        book_ready = state.book.healthy(
+            now_ms, self.max_book_age_ms, float(self.protocol_data["parameters"]["universe"]["max_spread_bps"])
+        )
         blocker = None
         if not self.evaluation_eligible:
             blocker = "partial_day_observation_only"
@@ -503,6 +542,123 @@ class PaperApp:
                     continue
                 state.recorded_decisions.add(decision_key)
                 self._record_decision(state, decision, price, now_ms)
+        self._evaluate_shadow(state, levels, now_ms)
+
+    @staticmethod
+    def _update_density_walls(state: SymbolState, events: list[dict[str, Any]]) -> None:
+        for event in events:
+            side = str(event.get("side", ""))
+            try:
+                price = float(event["price"])
+                quantity = float(event["quantity"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            key = (side, price)
+            kind = str(event.get("type", ""))
+            if kind == "wall_persistent":
+                observed_at = int(event.get("first_candidate_at_ms", event.get("received_ms", 0)))
+                state.density_walls[key] = {
+                    "side": side,
+                    "price": price,
+                    "observed_at_ms": observed_at,
+                    "initial_size": quantity,
+                    "current_remaining": quantity,
+                    "source_event_id": hashlib.sha256(
+                        f"{state.symbol}|{side}|{price}|{observed_at}".encode()
+                    ).hexdigest()[:24],
+                    "evidence_quality": "observed",
+                }
+            elif key in state.density_walls and kind in {"depth_reduced", "depth_added", "level_removed"}:
+                state.density_walls[key]["current_remaining"] = quantity
+                if kind == "level_removed":
+                    state.density_walls[key]["evidence_quality"] = "ambiguous"
+
+    def _evaluate_shadow(self, state: SymbolState, levels: list[V2Level], now_ms: int) -> None:
+        shadow_evaluation_eligible = self.shadow_started_at_ms <= (now_ms // 86_400_000) * 86_400_000 + 300_000
+        retest_evaluator = self.shadow_retests.get(state.symbol)
+        if retest_evaluator is not None:
+            for setup in retest_evaluator.evaluate(
+                symbol=state.symbol,
+                now_ms=now_ms,
+                bars=state.bars,
+                levels=state.levels,
+            ):
+                if setup.broken_at_ms is None or setup.status is ShadowSetupStatus.REJECTED:
+                    continue
+                occurred_at = setup.reclaim_at_ms or setup.invalidated_at_ms or setup.retest_at_ms or setup.broken_at_ms
+                features = {
+                    **dict(setup.features),
+                    "level_id": setup.level_id,
+                    "level_timeframe": setup.level_timeframe,
+                    "phase": setup.phase.value,
+                    "broken_at_ms": setup.broken_at_ms,
+                    "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
+                }
+                self.journal.record_shadow_diagnostic(
+                    {
+                        "diagnostic_id": setup.setup_id,
+                        "setup_id": f"{state.symbol}:retest_reclaim_v1:{setup.level_id}:{setup.broken_at_ms}",
+                        "occurred_at_ms": occurred_at,
+                        "symbol": state.symbol,
+                        "lane": setup.lane,
+                        "side": setup.side.value,
+                        "status": setup.status.value,
+                        "reason": setup.reason,
+                        "reference_price": setup.level_price,
+                        "stop_price": setup.stop_price,
+                        "target_price": setup.target_price,
+                        "protocol_hash": self.protocol_hash,
+                        "features": features,
+                    }
+                )
+
+        orderflow_evaluator = self.shadow_orderflow.get(state.symbol)
+        if orderflow_evaluator is None:
+            return
+        cascade = orderflow_evaluator.cascade_terminal_exit(
+            symbol=state.symbol,
+            now_ms=now_ms,
+            bars=state.bars,
+            levels=levels,
+        )
+        if cascade.reason != "waiting_for_terminal_context":
+            record = cascade.to_record(self.protocol_hash)
+            record["features"] = {
+                **dict(record["features"]),
+                "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
+            }
+            self.journal.record_shadow_diagnostic(record)
+
+        expired_walls: list[tuple[str, float]] = []
+        for key, wall in state.density_walls.items():
+            observed_at = int(wall["observed_at_ms"])
+            diagnostic = orderflow_evaluator.density_bounce_v1(
+                symbol=state.symbol,
+                now_ms=now_ms,
+                bars=state.bars,
+                wall=DensityWallEvidence(
+                    symbol=state.symbol,
+                    side=PaperSide.LONG if wall["side"] == "bid" else PaperSide.SHORT,
+                    price=float(wall["price"]),
+                    observed_at_ms=observed_at,
+                    wall_age_ms=max(0, now_ms - observed_at),
+                    initial_size=float(wall["initial_size"]),
+                    current_remaining=float(wall["current_remaining"]),
+                    source_event_id=str(wall["source_event_id"]),
+                    evidence_quality=str(wall["evidence_quality"]),
+                ),
+                levels=levels,
+            )
+            record = diagnostic.to_record(self.protocol_hash)
+            record["features"] = {
+                **dict(record["features"]),
+                "evaluation_eligible": "true" if shadow_evaluation_eligible else "false",
+            }
+            self.journal.record_shadow_diagnostic(record)
+            if now_ms - observed_at > 30 * 60_000 or wall["evidence_quality"] == "ambiguous":
+                expired_walls.append(key)
+        for key in expired_walls:
+            state.density_walls.pop(key, None)
 
     @staticmethod
     def _atr(bars: list[Bar], period: int = 14) -> float:
@@ -660,6 +816,9 @@ class PaperApp:
         for item in self.journal.position_history():
             item["closed_at"] = _stamp(int(item["closed_at_ms"]))
             history.append(item)
+        shadow_diagnostics = self.journal.shadow_diagnostics(symbol, limit=50)
+        for item in shadow_diagnostics:
+            item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -672,6 +831,7 @@ class PaperApp:
             "positions": positions,
             "open_orders": open_orders,
             "history": history,
+            "shadow_diagnostics": shadow_diagnostics,
             "readiness": self._readiness(state, now_ms),
             "orderflow": state.last_orderflow,
         }

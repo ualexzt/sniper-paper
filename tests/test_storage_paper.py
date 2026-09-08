@@ -139,3 +139,33 @@ def test_restart_reconcile_preserves_persisted_pending_order(tmp_path: Path) -> 
     assert restored.restore()
     assert restored.pending and restored.pending.signal.signal_id == "s1"
     assert journal.signal_row("s1")["status"] == "TRIGGERED"
+
+
+def test_shadow_diagnostic_is_idempotent_and_has_no_execution_link(tmp_path: Path) -> None:
+    database = tmp_path / "paper.db"
+    journal = Journal(database)
+    row = {
+        "diagnostic_id": "diag-1",
+        "setup_id": "setup-1",
+        "occurred_at_ms": 1_000,
+        "symbol": "BTCUSDT",
+        "lane": "retest_reclaim_v1",
+        "side": "LONG",
+        "status": "OBSERVED",
+        "reason": "causal_retest_confirmed",
+        "reference_price": 100.0,
+        "stop_price": 99.5,
+        "target_price": 102.0,
+        "protocol_hash": "shadow-hash",
+        "features": {"level_id": "broken-1"},
+    }
+
+    assert journal.record_shadow_diagnostic(row) is True
+    assert journal.record_shadow_diagnostic(row) is False
+    assert Journal(database).record_shadow_diagnostic(row) is False
+    assert journal.shadow_diagnostics("BTCUSDT") == [{**row, "features": {"level_id": "broken-1"}}]
+
+    with journal.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Journal:
@@ -122,6 +122,23 @@ class Journal:
                     message TEXT NOT NULL,
                     details_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS shadow_diagnostics (
+                    diagnostic_id TEXT PRIMARY KEY,
+                    setup_id TEXT NOT NULL,
+                    occurred_at_ms INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    lane TEXT NOT NULL,
+                    side TEXT CHECK(side IS NULL OR side IN ('LONG', 'SHORT')),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'OBSERVED', 'ARMED', 'CONFIRMED', 'BLOCKED', 'REJECTED', 'INVALIDATED', 'EXPIRED'
+                    )),
+                    reason TEXT NOT NULL,
+                    reference_price REAL,
+                    stop_price REAL,
+                    target_price REAL,
+                    protocol_hash TEXT NOT NULL,
+                    features_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS bars (
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
@@ -145,6 +162,8 @@ class Journal:
                     ON paper_orders(status, created_at_ms DESC);
                 CREATE INDEX IF NOT EXISTS idx_service_events_time
                     ON service_events(occurred_at_ms DESC);
+                CREATE INDEX IF NOT EXISTS idx_shadow_diagnostics_symbol_time
+                    ON shadow_diagnostics(symbol, occurred_at_ms DESC);
                 """
             )
             db.execute(
@@ -348,6 +367,55 @@ class Journal:
                    VALUES (?, ?, ?, ?, ?)""",
                 (occurred_at_ms, severity, kind, message, _json(details or {})),
             )
+
+    def record_shadow_diagnostic(self, diagnostic: Mapping[str, Any]) -> bool:
+        """Persist one idempotent observation with no paper-execution linkage."""
+        fields = (
+            "diagnostic_id",
+            "setup_id",
+            "occurred_at_ms",
+            "symbol",
+            "lane",
+            "side",
+            "status",
+            "reason",
+            "reference_price",
+            "stop_price",
+            "target_price",
+            "protocol_hash",
+        )
+        values = [diagnostic.get(field) for field in fields]
+        values.append(_json(diagnostic.get("features", {})))
+        with self.connect() as db:
+            cursor = db.execute(
+                f"INSERT INTO shadow_diagnostics "
+                f"({', '.join(fields)}, features_json) VALUES ({', '.join('?' for _ in values)}) "
+                "ON CONFLICT(diagnostic_id) DO NOTHING",
+                values,
+            )
+        return cursor.rowcount == 1
+
+    def shadow_diagnostics(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        with self.connect() as db:
+            if symbol is None:
+                rows = db.execute(
+                    "SELECT * FROM shadow_diagnostics ORDER BY occurred_at_ms DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM shadow_diagnostics
+                       WHERE symbol=? ORDER BY occurred_at_ms DESC LIMIT ?""",
+                    (symbol, limit),
+                ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["features"] = json.loads(item.pop("features_json"))
+            result.append(item)
+        return result
 
     def set_meta(self, key: str, value: str) -> None:
         with self.connect() as db:
