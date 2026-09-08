@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen specification date: 2026-09-07.
+Frozen specification version: v2.1, dated 2026-09-08.
 
 This document defines the paper-only v2 evaluator foundation. It does not place
 orders, does not depend on the live app parser, and only consumes immutable
@@ -34,6 +34,23 @@ The evaluator accepts immutable input dataclasses:
 
 No decision may read bars or orderflow with timestamps later than the
 evaluation timestamp. Future data is ignored, not backfilled.
+
+### Level lifecycle
+
+A confirmed horizontal level remains eligible until its first causal,
+close-based break. A HIGH breaks above and a LOW breaks below by at least one
+instrument tick when either of these conditions is first met:
+
+- two consecutive completed 1m candles close beyond the level; or
+- one completed candle on the level's own 15m/4h source timeframe closes
+  beyond it.
+
+A wick beyond the price and a single 1m close followed by a reclaim do not
+break the level. This preserves the failed-sweep/reclaim hypothesis. Once
+broken, the level is absorbing: it cannot reactivate when price returns. The
+same `broken_at_ms` cutoff is applied before target selection and before chart
+rendering. Bootstrap history reconstructs the cutoff after a restart; bars
+closed before level confirmation or after evaluation time are ignored.
 
 The required orderflow frame is intentionally explicit. It carries:
 

@@ -21,6 +21,10 @@ executable entry, TP/SL, costs, data quality, and restart state.
   causal 15-second footprint buckets, DOM evidence, receive-time bars, and
   causal 15m/4h levels. An application-level WebSocket ping avoids the prior
   recurring library keepalive disconnects.
+- A level is removed from both future target selection and the chart after a
+  causal close-through: two consecutive completed 1m closes or one completed
+  source-timeframe close at least one tick beyond it. Wicks do not invalidate
+  levels, and broken levels never reactivate after price returns.
 - V2 keeps nine named lanes isolated. `failed_sweep_reclaim` is primary;
   breakout/reaction lanes remain separate hypotheses, while
   `dom_confirmed_breakout` and `diagonal_context` are diagnostic-only.

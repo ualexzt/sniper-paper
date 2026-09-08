@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from .market import Bar
@@ -27,6 +27,11 @@ class Level:
     touches: int = 1
     level_class: str = "swing"
     origin_at_ms: int | None = None
+    broken_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.broken_at_ms is not None and self.broken_at_ms < self.confirmed_at_ms:
+            raise ValueError("broken_at_ms cannot precede confirmed_at_ms")
 
 
 @dataclass(frozen=True)
@@ -294,7 +299,7 @@ def _nearest_target(
         for level in levels
         if level.symbol == symbol
         and level.timeframe == timeframe
-        and level.confirmed_at_ms <= now_ms
+        and _level_is_active(level, now_ms)
         and (
             (side is Side.LONG and level.side is LevelSide.HIGH and level.price > price)
             or (side is Side.SHORT and level.side is LevelSide.LOW and level.price < price)
@@ -350,10 +355,14 @@ def _cluster_targets(levels: Sequence[Level], side: Side, tolerance_bp: float = 
 
 
 def current_display_levels(
-    levels: Iterable[Level], symbol: str, price: float, now_ms: int, limit: int = 8
+    levels: Iterable[Level],
+    symbol: str,
+    price: float,
+    now_ms: int,
+    limit: int = 8,
 ) -> list[Level]:
     """Return the same structural level families that can become strategy targets."""
-    raw = [level for level in levels if level.symbol == symbol and level.confirmed_at_ms <= now_ms]
+    raw = [level for level in levels if level.symbol == symbol and _level_is_active(level, now_ms)]
     four_hour = [level for level in raw if level.timeframe == "4h"]
     previous_day = [level for level in raw if level.timeframe == "15m" and level.level_class == "previous_day"]
     fifteen_highs = [level for level in raw if level.timeframe == "15m" and level.side is LevelSide.HIGH]
@@ -398,3 +407,86 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
             low_origin,
         ),
     ]
+
+
+def _level_is_active(level: Level, now_ms: int) -> bool:
+    """Keep a level active until a confirmed close-through invalidates it."""
+    return level.confirmed_at_ms <= now_ms and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
+
+
+def apply_level_breaks(
+    levels: Iterable[Level],
+    bars: Mapping[str, Sequence[Bar]],
+    now_ms: int,
+    *,
+    tick_size: float,
+    buffer_ticks: int = 1,
+    fast_timeframe: str = "1m",
+    fast_confirming_closes: int = 2,
+    source_confirming_closes: int = 1,
+) -> list[Level]:
+    """Annotate each level's first absorbing causal close-through.
+
+    Wicks do not count. A level breaks after consecutive completed fast-TF
+    closes, or after one completed close on the level's own timeframe.
+    """
+    if tick_size <= 0 or buffer_ticks < 1 or fast_confirming_closes < 1 or source_confirming_closes < 1:
+        raise ValueError("level-break parameters must be positive")
+    buffer = tick_size * buffer_ticks
+    result: list[Level] = []
+    for level in levels:
+        if level.broken_at_ms is not None:
+            result.append(level)
+            continue
+        candidates = [
+            broken_at
+            for broken_at in (
+                _first_close_break(
+                    level,
+                    bars.get(level.timeframe, ()),
+                    now_ms,
+                    buffer,
+                    source_confirming_closes,
+                ),
+                _first_close_break(
+                    level,
+                    bars.get(fast_timeframe, ()),
+                    now_ms,
+                    buffer,
+                    fast_confirming_closes,
+                )
+                if level.timeframe != fast_timeframe
+                else None,
+            )
+            if broken_at is not None
+        ]
+        result.append(replace(level, broken_at_ms=min(candidates)) if candidates else level)
+    return result
+
+
+def _first_close_break(
+    level: Level,
+    bars: Sequence[Bar],
+    now_ms: int,
+    buffer: float,
+    required_consecutive: int,
+) -> int | None:
+    threshold = level.price + buffer if level.side is LevelSide.HIGH else level.price - buffer
+    epsilon = max(abs(threshold) * 1e-12, buffer * 1e-9)
+    consecutive = 0
+    previous_closed_at_ms: int | None = None
+    for bar in bars:
+        if bar.symbol != level.symbol or bar.closed_at_ms <= level.confirmed_at_ms or bar.closed_at_ms > now_ms:
+            continue
+        if previous_closed_at_ms is not None and bar.opened_at_ms != previous_closed_at_ms:
+            consecutive = 0
+        beyond = (
+            bar.close >= threshold - epsilon
+            if level.side is LevelSide.HIGH
+            else bar.close <= threshold + epsilon
+        )
+        consecutive = consecutive + 1 if beyond else 0
+        previous_closed_at_ms = bar.closed_at_ms
+        if consecutive >= required_consecutive:
+            return bar.closed_at_ms
+    return None

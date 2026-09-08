@@ -5,6 +5,7 @@ from sniper_paper.strategy import (
     Level,
     LevelSide,
     StrategyEvaluator,
+    apply_level_breaks,
     current_display_levels,
     previous_utc_day_levels,
 )
@@ -79,3 +80,63 @@ def test_display_levels_keep_4h_and_clustered_15m_not_single_pivots() -> None:
     assert {level.level_class for level in result} == {"swing", "cluster"}
     assert all(level.level_id != "noise" for level in result)
     assert next(level for level in result if level.level_class == "cluster").origin_at_ms == 10
+
+
+def test_wick_and_single_fast_close_do_not_break_level() -> None:
+    level = Level("high", "XUSDT", "15m", LevelSide.HIGH, 100.0, 0)
+    one = [
+        bar(60_000, 0, 99.8, 100.5, 99.7, 99.9),
+        bar(60_000, 60_000, 99.9, 100.2, 99.8, 100.01),
+        bar(60_000, 120_000, 100.01, 100.1, 99.8, 99.95),
+    ]
+    [result] = apply_level_breaks([level], {"1m": one}, 180_000, tick_size=0.01)
+    assert result.broken_at_ms is None
+
+
+def test_two_fast_closes_break_level_at_second_close_and_never_reactivate() -> None:
+    level = Level("high", "XUSDT", "15m", LevelSide.HIGH, 100.0, 0)
+    one = [
+        bar(60_000, 0, 99.9, 100.2, 99.8, 100.01),
+        bar(60_000, 60_000, 100.01, 100.2, 99.9, 100.02),
+        bar(60_000, 120_000, 100.02, 100.1, 99.7, 99.9),
+    ]
+    [broken] = apply_level_breaks([level], {"1m": one}, 180_000, tick_size=0.01)
+    assert broken.broken_at_ms == 120_000
+    [still_broken] = apply_level_breaks([broken], {"1m": []}, 240_000, tick_size=0.01)
+    assert still_broken.broken_at_ms == 120_000
+    assert current_display_levels([still_broken], "XUSDT", 99.9, 240_000) == []
+
+
+def test_one_source_timeframe_close_breaks_levels_symmetrically() -> None:
+    high = Level("high", "XUSDT", "15m", LevelSide.HIGH, 100.0, 0)
+    low = Level("low", "XUSDT", "15m", LevelSide.LOW, 90.0, 0)
+    fifteen = [bar(900_000, 0, 95, 101, 89, 100.01), bar(900_000, 900_000, 95, 96, 89, 89.99)]
+    high_result, low_result = apply_level_breaks(
+        [high, low], {"15m": fifteen}, 1_800_000, tick_size=0.01
+    )
+    assert high_result.broken_at_ms == 900_000
+    assert low_result.broken_at_ms == 1_800_000
+
+
+def test_break_detection_ignores_preconfirmation_and_future_bars() -> None:
+    level = Level("high", "XUSDT", "15m", LevelSide.HIGH, 100.0, 120_000)
+    one = [
+        bar(60_000, 0, 100, 101, 99, 100.1),
+        bar(60_000, 60_000, 100, 101, 99, 100.1),
+        bar(60_000, 120_000, 100, 101, 99, 100.1),
+        bar(60_000, 180_000, 100, 101, 99, 100.1),
+    ]
+    [before_future_close] = apply_level_breaks([level], {"1m": one}, 239_999, tick_size=0.01)
+    assert before_future_close.broken_at_ms is None
+    [after_future_close] = apply_level_breaks([level], {"1m": one}, 240_000, tick_size=0.01)
+    assert after_future_close.broken_at_ms == 240_000
+
+
+def test_fast_closes_separated_by_data_gap_are_not_consecutive() -> None:
+    level = Level("high", "XUSDT", "15m", LevelSide.HIGH, 100.0, 0)
+    one = [
+        bar(60_000, 0, 100, 101, 99, 100.1),
+        bar(60_000, 120_000, 100, 101, 99, 100.1),
+    ]
+    [result] = apply_level_breaks([level], {"1m": one}, 180_000, tick_size=0.01)
+    assert result.broken_at_ms is None

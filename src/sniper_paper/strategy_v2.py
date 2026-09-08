@@ -52,6 +52,7 @@ class Level:
     touches: int = 1
     level_class: str = "swing"
     origin_at_ms: int | None = None
+    broken_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,7 @@ def _nearest_target(
             for level in levels
             if level.symbol == symbol
             and level.confirmed_at_ms <= now_ms
+            and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
             and level.timeframe in timeframes
             and level.side is LevelSide.HIGH
             and level.price > price
@@ -298,6 +300,7 @@ def _nearest_target(
         for level in levels
         if level.symbol == symbol
         and level.confirmed_at_ms <= now_ms
+        and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
         and level.timeframe in timeframes
         and level.side is LevelSide.LOW
         and level.price < price

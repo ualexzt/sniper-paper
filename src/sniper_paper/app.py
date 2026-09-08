@@ -23,6 +23,7 @@ from .storage import Journal
 from .strategy import (
     CausalLevelEngine,
     Level,
+    apply_level_breaks,
     current_display_levels,
     previous_utc_day_levels,
 )
@@ -105,6 +106,11 @@ class PaperApp:
         self.executor.restore()
         self.max_book_age_ms = int(params["data_quality"]["max_book_age_ms"])
         self.warmup_ms = int(params["data_quality"]["warmup_minutes_after_snapshot"]) * 60_000
+        lifecycle = params["level_lifecycle"]
+        self.level_break_buffer_ticks = int(lifecycle["break_buffer_ticks"])
+        self.level_break_fast_timeframe = str(lifecycle["fast_timeframe"])
+        self.level_break_fast_closes = int(lifecycle["fast_confirming_closes"])
+        self.level_break_source_closes = int(lifecycle["source_timeframe_confirming_closes"])
         self.states: dict[str, SymbolState] = {}
         self.footprint: Footprint | None = None
         self.dom: DomTracker | None = None
@@ -259,6 +265,7 @@ class PaperApp:
                 for bar in parsed:
                     state.levels.extend(state.level_engines[name].add(bar))
         state.levels.extend(previous_utc_day_levels(state.symbol, state.bars["15m"], _now_ms()))
+        self._refresh_level_lifecycle(state, _now_ms())
         self.journal.event(_now_ms(), "INFO", "BOOTSTRAP", f"loaded causal bars for {state.symbol}")
 
     async def handle_message(self, message: dict, received_at_ms: int) -> None:
@@ -333,15 +340,19 @@ class PaperApp:
             return
         try:
             trade = Trade(symbol, received_at_ms, str(row["i"]), float(row["p"]), float(row["v"]), str(row["S"]))
+            completed_any = False
             for name in ("4h", "15m", "5m", "1m"):
                 for completed in state.builders[name].add(trade):
                     if state.bars[name] and completed.opened_at_ms <= state.bars[name][-1].opened_at_ms:
                         continue
                     state.bars[name].append(completed)
+                    completed_any = True
                     self.journal.record_bar(name, completed, "public_trade")
                     state.bars[name] = state.bars[name][-500:]
                     if name in state.level_engines:
                         state.levels.extend(state.level_engines[name].add(completed))
+            if completed_any:
+                self._refresh_level_lifecycle(state, received_at_ms)
         except (KeyError, TypeError, ValueError) as exc:
             self.journal.event(received_at_ms, "WARN", "TRADE", str(exc), {"symbol": symbol})
 
@@ -473,6 +484,7 @@ class PaperApp:
                 level.touches,
                 level.level_class,
                 level.origin_at_ms,
+                level.broken_at_ms,
             )
             for level in state.levels
         ]
@@ -502,6 +514,18 @@ class PaperApp:
             for previous, bar in pairwise(sample)
         ]
         return sum(values) / len(values)
+
+    def _refresh_level_lifecycle(self, state: SymbolState, now_ms: int) -> None:
+        state.levels = apply_level_breaks(
+            state.levels,
+            state.bars,
+            now_ms,
+            tick_size=state.tick_size,
+            buffer_ticks=self.level_break_buffer_ticks,
+            fast_timeframe=self.level_break_fast_timeframe,
+            fast_confirming_closes=self.level_break_fast_closes,
+            source_confirming_closes=self.level_break_source_closes,
+        )
 
     def _record_decision(self, state: SymbolState, decision: StrategyDecisionV2, price: float, now_ms: int) -> None:
         target = decision.target_level

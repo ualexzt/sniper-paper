@@ -1,6 +1,6 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2",
+  "version": "v2.1",
   "status": "frozen_spec",
   "safety_boundary": {
     "public_market_data_only": true,
@@ -43,6 +43,14 @@
       "orderbook_depth": 50,
       "max_book_age_ms": 500,
       "warmup_minutes_after_snapshot": 5
+    },
+    "level_lifecycle": {
+      "break_buffer_ticks": 1,
+      "fast_timeframe": "1m",
+      "fast_confirming_closes": 2,
+      "source_timeframe_confirming_closes": 1,
+      "wick_breaks_level": false,
+      "reactivation_allowed": false
     },
     "strategy": {
       "tick_size": 0.01,

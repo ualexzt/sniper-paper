@@ -284,6 +284,23 @@ def test_nearest_target_is_symmetric_for_both_sides() -> None:
     assert short_target.price == pytest.approx(99.2)
 
 
+def test_nearest_target_skips_levels_broken_as_of_evaluation_time() -> None:
+    levels = [
+        Level("broken", "XUSDT", "15m", LevelSide.HIGH, 100.8, 0, broken_at_ms=900),
+        Level("active", "XUSDT", "15m", LevelSide.HIGH, 101.2, 0),
+    ]
+    target = _nearest_target(
+        levels,
+        symbol="XUSDT",
+        side=Side.LONG,
+        price=100.0,
+        now_ms=1_000,
+        timeframes={"15m"},
+    )
+    assert target is not None
+    assert target.level_id == "active"
+
+
 def test_failed_sweep_is_symmetric() -> None:
     long_fixture = build_failed_sweep_fixture()
     short_fixture = {

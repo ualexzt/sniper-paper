@@ -48,6 +48,23 @@ def test_market_detail_exposes_real_state_and_rejects_out_of_universe(tmp_path: 
         app.market_detail("OTHERUSDT", "5m")
 
 
+def test_level_break_is_absorbed_into_state_and_hidden_from_dashboard(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT", tick_size=0.01)
+    state.levels = [Level("l1", "XUSDT", "4h", LevelSide.HIGH, 100.0, 0)]
+    state.bars["1m"] = [
+        Bar("XUSDT", 60_000, 0, 60_000, 99, 101, 98, 100.01, 1, 0, 1),
+        Bar("XUSDT", 60_000, 60_000, 120_000, 100, 101, 99, 100.02, 1, 0, 1),
+    ]
+    state.bars["5m"] = [Bar("XUSDT", 300_000, 0, 300_000, 99, 101, 98, 100, 1, 0, 1)]
+    app.states = {"XUSDT": state}
+
+    app._refresh_level_lifecycle(state, 120_000)
+
+    assert state.levels[0].broken_at_ms == 120_000
+    assert app.market_detail("XUSDT", "5m")["levels"] == []
+
+
 def test_market_detail_appends_forming_bar_for_dashboard_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = PaperApp(Journal(tmp_path / "paper.db"))
     state = SymbolState("XUSDT")
