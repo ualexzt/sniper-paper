@@ -32,3 +32,4 @@ def test_dashboard_surfaces_observation_mode_and_book_readiness(tmp_path: Path) 
     assert result["current_universe"][0]["spread_bp"] == "1.25 bp"
     assert "daily rank 1" in result["current_universe"][0]["reason"]
     assert "NATR unavailable" in result["current_universe"][0]["reason"]
+    assert result["current_universe"][0]["timeframe"] == "levels 1m / 5m / 15m / 30m / 1h / 4h / 1d"

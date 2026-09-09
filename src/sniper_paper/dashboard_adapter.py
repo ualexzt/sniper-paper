@@ -61,7 +61,7 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
                 "reason": _universe_reason(row["rank"], row["metrics"], mode),
                 "spread_bp": f"{float(row['metrics'].get('spread_bps') or 0):.2f} bp",
                 "depth": f"${float(row['metrics'].get('depth_notional_top5') or 0):,.0f}",
-                "timeframe": "1m / 5m / 15m / 4h",
+                "timeframe": "levels 1m / 5m / 15m / 30m / 1h / 4h / 1d",
             }
             for row in raw["universe"]
         ],
