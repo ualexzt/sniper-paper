@@ -45,6 +45,19 @@ def test_level_catalog_migrates_additively_and_upsert_is_idempotent(tmp_path: Pa
         assert db.execute("SELECT COUNT(*) FROM level_history").fetchone()[0] == 0
 
 
+def test_batch_upsert_matches_sequential_lifecycle_and_history(tmp_path: Path) -> None:
+    single = Journal(tmp_path / "single.db")
+    batch = Journal(tmp_path / "batch.db")
+    records = [level(), level(broken_at_ms=3000, updated_at_ms=3000), level()]
+    expected = [single.upsert_level(row) for row in records]
+    assert batch.upsert_levels(records) == expected
+    assert batch.load_levels() == single.load_levels()
+    assert batch.level_history_rows() == single.level_history_rows()
+    before = batch.level_history_rows()
+    batch.upsert_levels(records[-1:])
+    assert batch.level_history_rows() == before
+
+
 def test_break_state_survives_restart_and_stale_bootstrap(tmp_path: Path) -> None:
     database = tmp_path / "paper.db"
     journal = Journal(database)

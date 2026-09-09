@@ -1,11 +1,19 @@
 # Digash change implementation status
 
-Date: 2026-09-09. Protocol: `paper_strategy_v2.json` v2.5.0.
+Date: 2026-09-09. Protocol: `paper_strategy_v2.json` v2.5.1.
 
 This is an implementation ledger, not evidence of profitability and not a
 claim that the undisclosed Digash level algorithm has been cloned exactly.
 
 ## Implemented and locally verified
+
+- v2.5.1 fixes constituent-before-merge invalidation, durable member tombstones,
+  and version-isolated level IDs. Source and fast confirming bars are separate.
+- Bootstrap requests end before the forming bucket. Startup/reconnect partial
+  receive-time buckets are quarantined; resulting gaps are not filled with
+  fabricated OHLCV. Subsequent bootstrap restores exchange history.
+- OHLCV aggregation is incremental with bounded trade-ID deduplication; level
+  persistence batches records into one transaction per refresh.
 
 - One canonical `Level` model is shared by the chart and strategy evaluators.
 - Level formations and their revisions are stored in SQLite; `broken_at_ms` is

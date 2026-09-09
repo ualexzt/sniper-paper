@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -127,9 +128,29 @@ class BarBuilder:
         self.symbol = symbol
         self.timeframe_ms = timeframe_ms
         self._bucket: int | None = None
-        self._trades: list[Trade] = []
         self._seen_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        self._open: float | None = None
+        self._high: float | None = None
+        self._low: float | None = None
+        self._close: float | None = None
+        self._volume = 0.0
+        self._delta_notional = 0.0
+        self._trade_count = 0
+        self._quarantine_first_bucket = False
         self._current: Bar | None = None
+
+    def quarantine_first_bucket(self) -> None:
+        """Suppress the current/next partial bucket after restart or reconnect."""
+        self._bucket = None
+        self._current = None
+        self._reset_stats()
+        self._quarantine_first_bucket = True
+
+    def _reset_stats(self) -> None:
+        self._open = self._high = self._low = self._close = None
+        self._volume = self._delta_notional = 0.0
+        self._trade_count = 0
 
     def add(self, trade: Trade) -> list[Bar]:
         if trade.symbol != self.symbol:
@@ -141,15 +162,26 @@ class BarBuilder:
             raise ValueError("receive time moved backwards")
         completed: list[Bar] = []
         if self._bucket is not None and bucket > self._bucket:
-            completed.append(self._finish())
-            self._trades = []
+            if not self._quarantine_first_bucket:
+                completed.append(self._finish())
+            self._quarantine_first_bucket = False
             self._current = None
+            self._reset_stats()
         self._bucket = bucket
         self._seen_ids.add(trade.trade_id)
-        self._trades.append(trade)
+        self._seen_order.append(trade.trade_id)
+        if self._open is None:
+            self._open = self._high = self._low = trade.price
+        else:
+            self._high = max(self._high, trade.price)
+            self._low = min(self._low, trade.price)
+        self._close = trade.price
+        self._volume += trade.quantity
+        self._delta_notional += trade.signed_notional
+        self._trade_count += 1
         self._current = self._snapshot()
-        if len(self._seen_ids) > 100_000:
-            self._seen_ids = {item.trade_id for item in self._trades}
+        while len(self._seen_order) > 100_000:
+            self._seen_ids.discard(self._seen_order.popleft())
         return completed
 
     def current(self) -> Bar | None:
@@ -157,25 +189,20 @@ class BarBuilder:
         return self._current
 
     def _finish(self) -> Bar:
-        if self._bucket is None or not self._trades:
+        if self._bucket is None or self._trade_count == 0:
             raise RuntimeError("cannot finish empty bar")
         return self._snapshot()
 
     def _snapshot(self) -> Bar:
-        trades = tuple(self._trades)
-        prices = [trade.price for trade in trades]
         return Bar(
             symbol=self.symbol,
             timeframe_ms=self.timeframe_ms,
             opened_at_ms=self._bucket,
             closed_at_ms=self._bucket + self.timeframe_ms,
-            open=prices[0],
-            high=max(prices),
-            low=min(prices),
-            close=prices[-1],
-            volume=sum(trade.quantity for trade in trades),
-            delta_notional=sum(trade.signed_notional for trade in trades),
-            trades=len(trades),
+            open=self._open, high=self._high, low=self._low, close=self._close,
+            volume=self._volume,
+            delta_notional=self._delta_notional,
+            trades=self._trade_count,
         )
 
 

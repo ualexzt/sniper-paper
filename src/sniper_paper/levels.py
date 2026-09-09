@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-DIGASH_LEVEL_VERSION = "digash_horizontal_levels_v1"
+DIGASH_LEVEL_VERSION = "digash_horizontal_levels_v2"
 DIGASH_LEVEL_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h", "1d"})
 
 

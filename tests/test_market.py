@@ -72,3 +72,27 @@ def test_bar_builder_rejects_late_receive_time() -> None:
     builder.add(Trade("ETHUSDT", 61_000, "a", 10, 1, "Buy"))
     with pytest.raises(ValueError):
         builder.add(Trade("ETHUSDT", 59_000, "b", 10, 1, "Buy"))
+
+
+def test_bar_builder_quarantines_partial_first_bucket_after_restart() -> None:
+    builder = BarBuilder("BTCUSDT", 60_000)
+    builder.quarantine_first_bucket()
+
+    assert builder.add(Trade("BTCUSDT", 15_000, "partial", 100, 1, "Buy")) == []
+    # The 00:00-01:00 bucket only began being observed at 00:15.
+    assert builder.add(Trade("BTCUSDT", 61_000, "next", 101, 1, "Buy")) == []
+    completed = builder.add(Trade("BTCUSDT", 121_000, "following", 102, 1, "Buy"))
+
+    assert len(completed) == 1
+    assert completed[0].opened_at_ms == 60_000
+    assert completed[0].close == 101
+
+
+def test_reconnect_discards_both_pre_gap_and_partial_post_gap_bucket() -> None:
+    builder = BarBuilder("BTCUSDT", 86_400_000)
+    builder.add(Trade("BTCUSDT", 0, "before", 200, 5, "Buy"))
+    builder.quarantine_first_bucket()
+    builder.add(Trade("BTCUSDT", 54_000_000, "after", 100, 1, "Sell"))
+    assert builder.add(Trade("BTCUSDT", 86_400_000, "next", 110, 2, "Buy")) == []
+    [complete] = builder.add(Trade("BTCUSDT", 172_800_000, "last", 111, 1, "Buy"))
+    assert (complete.opened_at_ms, complete.high, complete.volume, complete.trades) == (86_400_000, 110, 2, 1)

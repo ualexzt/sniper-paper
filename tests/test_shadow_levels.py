@@ -121,3 +121,59 @@ def test_post_confirmation_break_is_left_for_instrument_aware_runtime_lifecycle(
     after_break = build_reference_levels(rows, timeframe="1m", now_ms=rows[66].closed_at_ms)
     assert any(level.price == 110.0 for level in before_break.levels)
     assert any(level.price == 110.0 for level in after_break.levels)
+
+
+def test_lifecycle_breaks_constituent_before_merge_and_never_resurrects_cluster() -> None:
+    """A broken 110 pivot must not revive when the 110.02 pivot is confirmed."""
+    rows = make_bars(120, highs=(40,))
+    rows[65] = replace(rows[65], high=110.02, close=110.02)
+
+    before = build_reference_levels(rows[:67], timeframe="1m", now_ms=rows[66].closed_at_ms,
+                                    tick_size=0.01)
+    assert any(level.price == 110.0 and level.broken_at_ms is not None for level in before.levels)
+
+    after = build_reference_levels(rows, timeframe="1m", now_ms=rows[86].closed_at_ms,
+                                   tick_size=0.01, persisted_levels=before.levels)
+    old = [level for level in after.levels if level.origin_at_ms == rows[40].opened_at_ms]
+    fresh = [level for level in after.levels if level.origin_at_ms == rows[65].opened_at_ms]
+    # 1m is the source timeframe here, so the configured source rule is one
+    # completed close (the fast two-close rule applies to slower levels).
+    assert old and old[0].broken_at_ms == rows[65].closed_at_ms
+    assert fresh and fresh[0].broken_at_ms is None
+    assert not any(level.level_class == "digash_cluster" and level.broken_at_ms is None for level in after.levels)
+
+
+def test_lifecycle_restart_replay_preserves_broken_constituent_tombstone() -> None:
+    rows = make_bars(120, highs=(40,))
+    rows[65] = replace(rows[65], high=110.02, close=110.02)
+    continuous = build_reference_levels(rows, timeframe="1m", now_ms=rows[86].closed_at_ms,
+                                         tick_size=0.01)
+    first = build_reference_levels(rows[:67], timeframe="1m", now_ms=rows[66].closed_at_ms,
+                                   tick_size=0.01)
+    restarted = build_reference_levels(rows, timeframe="1m", now_ms=rows[86].closed_at_ms,
+                                        tick_size=0.01, persisted_levels=first.levels)
+    assert [(level.level_id, level.broken_at_ms) for level in restarted.levels] == [
+        (level.level_id, level.broken_at_ms) for level in continuous.levels
+    ]
+
+
+def test_lifecycle_uses_actual_fast_bars_for_slower_source_level() -> None:
+    four_hour_ms = 14_400_000
+    rows = [
+        Bar("XUSDT", four_hour_ms, i * four_hour_ms, (i + 1) * four_hour_ms,
+            100.0, 110.0 if i == 40 else 101.0, 99.0, 100.0, 1.0, 0.0, 1)
+        for i in range(61)
+    ]
+    start = rows[60].closed_at_ms
+    fast = [
+        Bar("XUSDT", INTERVAL, start + i * INTERVAL, start + (i + 1) * INTERVAL,
+            100.0, 110.02, 99.0, 110.02, 1.0, 0.0, 1)
+        for i in range(2)
+    ]
+    result = build_reference_levels(
+        rows, timeframe="4h", now_ms=fast[-1].closed_at_ms, tick_size=0.01,
+        lifecycle_bars={"4h": rows, "1m": fast}, fast_timeframe="1m",
+        fast_confirming_closes=2, source_confirming_closes=1,
+    )
+    level = next(level for level in result.levels if level.price == 110.0)
+    assert level.broken_at_ms == fast[-1].closed_at_ms

@@ -619,43 +619,18 @@ class Journal:
         ``level_history`` so revisions remain auditable.
         """
         incoming = _normalise_level(level)
-        fields = _LEVEL_STORAGE_FIELDS
         with self.connect() as db:
-            existing = db.execute(
-                "SELECT " + ", ".join(fields) + " FROM levels WHERE level_id=?",
-                (incoming["level_id"],),
-            ).fetchone()
-            if existing is None:
-                db.execute(
-                    "INSERT INTO levels (" + ", ".join(fields) + ") VALUES (" + ", ".join("?" for _ in fields) + ")",
-                    [incoming[field] for field in fields],
-                )
-                stored = incoming
-            else:
-                merged = _merge_level(existing, incoming)
-                stored = dict(existing)
-                if any(stored[field] != merged[field] for field in fields):
-                    archived_at_ms = max(int(existing["updated_at_ms"]), int(merged["updated_at_ms"]))
-                    history_fields = fields + ("archived_at_ms",)
-                    db.execute(
-                        "INSERT INTO level_history ("
-                        + ", ".join(history_fields)
-                        + ") VALUES ("
-                        + ", ".join("?" for _ in history_fields)
-                        + ")",
-                        [existing[field] for field in fields] + [archived_at_ms],
-                    )
-                    assignments = ", ".join(f"{field}=?" for field in fields if field != "level_id")
-                    db.execute(
-                        "UPDATE levels SET " + assignments + " WHERE level_id=?",
-                        [merged[field] for field in fields if field != "level_id"] + [merged["level_id"]],
-                    )
-                    stored = merged
+            stored = _upsert_level_in_connection(db, incoming)
         return _level_mapping(stored)
 
     def upsert_levels(self, levels: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """Upsert levels in one caller-defined order and return stored rows."""
-        return [self.upsert_level(level) for level in levels]
+        """Upsert levels in one transaction, preserving caller-defined order."""
+        incoming_levels = [_normalise_level(level) for level in levels]
+        if not incoming_levels:
+            return []
+        with self.connect() as db:
+            stored_levels = [_upsert_level_in_connection(db, level) for level in incoming_levels]
+        return [_level_mapping(level) for level in stored_levels]
 
     def level_row(self, level_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -1043,6 +1018,45 @@ def _merge_level(existing: sqlite3.Row, incoming: Mapping[str, Any]) -> dict[str
         merged["broken_at_ms"] = None
         merged["invalidation_reason"] = incoming.get("invalidation_reason")
     return merged
+
+
+def _upsert_level_in_connection(
+    db: sqlite3.Connection,
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply one normalized level using an already-open transaction."""
+    fields = _LEVEL_STORAGE_FIELDS
+    existing = db.execute(
+        "SELECT " + ", ".join(fields) + " FROM levels WHERE level_id=?",
+        (incoming["level_id"],),
+    ).fetchone()
+    if existing is None:
+        db.execute(
+            "INSERT INTO levels (" + ", ".join(fields) + ") VALUES (" + ", ".join("?" for _ in fields) + ")",
+            [incoming[field] for field in fields],
+        )
+        return dict(incoming)
+
+    merged = _merge_level(existing, incoming)
+    stored = dict(existing)
+    if any(stored[field] != merged[field] for field in fields):
+        archived_at_ms = max(int(existing["updated_at_ms"]), int(merged["updated_at_ms"]))
+        history_fields = fields + ("archived_at_ms",)
+        db.execute(
+            "INSERT INTO level_history ("
+            + ", ".join(history_fields)
+            + ") VALUES ("
+            + ", ".join("?" for _ in history_fields)
+            + ")",
+            [existing[field] for field in fields] + [archived_at_ms],
+        )
+        assignments = ", ".join(f"{field}=?" for field in fields if field != "level_id")
+        db.execute(
+            "UPDATE levels SET " + assignments + " WHERE level_id=?",
+            [merged[field] for field in fields if field != "level_id"] + [merged["level_id"]],
+        )
+        return merged
+    return stored
 
 
 def _level_mapping(row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:

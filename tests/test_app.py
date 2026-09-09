@@ -90,12 +90,25 @@ def test_bootstrap_requests_and_retains_1000_completed_bars(tmp_path: Path, monk
 
     assert len(client.calls) == 7
     assert {call["limit"] for call in client.calls} == {HISTORY_LIMIT}
+    assert all(
+        call["end"] == now_ms - (now_ms % {
+            "1": 60_000, "5": 300_000, "15": 900_000, "30": 1_800_000,
+            "60": 3_600_000, "240": 14_400_000, "D": 86_400_000,
+        }[str(call["interval"])]) - 1
+        for call in client.calls
+    )
     level_timeframes = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
     assert all(len(state.bars[name]) == BAR_RETENTION for name in level_timeframes)
     assert all(
         state.history_diagnostics[name]["coverage_status"] == "complete"
         for name in level_timeframes
     )
+    # Actual bootstrap must suppress partial startup buckets on every source TF.
+    for name in ("4h", "1d"):
+        builder = state.builders[name]
+        boundary = (now_ms // builder.timeframe_ms + 1) * builder.timeframe_ms
+        builder.add(Trade("XUSDT", now_ms, "startup", 100, 1, "Buy"))
+        assert builder.add(Trade("XUSDT", boundary, "boundary", 101, 1, "Buy")) == []
 
 
 def test_digash_refresh_drops_aged_active_levels_but_retains_broken_history(tmp_path: Path) -> None:
@@ -301,6 +314,19 @@ def test_market_detail_appends_forming_bar_for_dashboard_only(tmp_path: Path, mo
     assert result["bar_closes_at_ms"] == 120_000
     assert result["server_time_ms"] == 65_000
     assert len(state.bars["1m"]) == 1
+
+
+def test_disconnect_quarantines_first_live_daily_bucket(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    app.states = {"XUSDT": state}
+
+    # A stream observed from mid-day must not later be presented as a full UTC day.
+    asyncio.run(app._trade({"s": "XUSDT", "i": "before", "p": "100", "v": "1", "S": "Buy"}, 15 * 3_600_000))
+    asyncio.run(app.handle_message({"op": "connection", "state": "disconnected"}, 16 * 3_600_000))
+    asyncio.run(app._trade({"s": "XUSDT", "i": "after", "p": "101", "v": "1", "S": "Buy"}, 86_400_000))
+
+    assert state.bars["1d"] == []
 
 
 def test_market_detail_readiness_requires_every_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

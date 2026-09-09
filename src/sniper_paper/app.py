@@ -336,17 +336,28 @@ class PaperApp:
             await asyncio.gather(rollover, heartbeat, return_exceptions=True)
 
     async def _bootstrap(self, state: SymbolState) -> None:
+        now_ms = _now_ms()
         for name, interval in BYBIT_INTERVALS.items():
+            # Bybit's kline endpoint may include the currently forming row when
+            # queried at a bucket boundary.  Bound the response strictly before
+            # the current bucket so the requested page is completed-only.
+            interval_ms = TIMEFRAMES[name]
+            completed_end_ms = now_ms - (now_ms % interval_ms) - 1
             payload = await asyncio.to_thread(
-                self.client.get_kline, symbol=state.symbol, interval=interval, limit=HISTORY_LIMIT
+                self.client.get_kline,
+                symbol=state.symbol,
+                interval=interval,
+                end=completed_end_ms,
+                limit=HISTORY_LIMIT,
             )
             rows = payload.get("result", {}).get("list", [])
-            parsed = _parse_klines(state.symbol, name, rows, _now_ms())
+            parsed = _parse_klines(state.symbol, name, rows, now_ms)
             state.bars[name].extend(parsed)
             state.bars[name] = state.bars[name][-BAR_RETENTION:]
             state.history_diagnostics[name] = _history_diagnostics(name, state.bars[name], HISTORY_LIMIT)
             self.journal.record_bars(name, parsed, "rest_kline")
-        now_ms = _now_ms()
+        for builder in state.builders.values():
+            builder.quarantine_first_bucket()
         self._refresh_digash_levels(state, now_ms)
         self._refresh_level_lifecycle(state, now_ms)
         self.journal.event(_now_ms(), "INFO", "BOOTSTRAP", f"loaded causal bars for {state.symbol}")
@@ -360,11 +371,24 @@ class PaperApp:
         absorbing break timestamps when a later 1000-bar window no longer
         contains the historical pivot.
         """
+        # Freeze existing cluster breaks before membership can change. Their
+        # constituent IDs remain tombstones for subsequent detector runs.
+        self._refresh_level_lifecycle(state, now_ms)
         config = GeometryConfig(history_limit=HISTORY_LIMIT, level_version=DIGASH_LEVEL_VERSION)
         detected: list[Level] = []
         for timeframe in DIGASH_TIMEFRAMES:
             result = build_reference_levels(
-                state.bars.get(timeframe, ()), timeframe=timeframe, now_ms=now_ms, config=config
+                state.bars.get(timeframe, ()),
+                timeframe=timeframe,
+                now_ms=now_ms,
+                config=config,
+                persisted_levels=[level for level in state.levels if level.timeframe == timeframe],
+                lifecycle_bars=state.bars,
+                tick_size=state.tick_size,
+                buffer_ticks=self.level_break_buffer_ticks,
+                fast_timeframe=self.level_break_fast_timeframe,
+                fast_confirming_closes=self.level_break_fast_closes,
+                source_confirming_closes=self.level_break_source_closes,
             )
             detected.extend(result.levels)
             state.history_diagnostics[timeframe] = {
@@ -391,6 +415,8 @@ class PaperApp:
                 for symbol_state in self.states.values():
                     symbol_state.book.invalidate()
                     symbol_state.snapshot_received_at_ms = None
+                    for builder in symbol_state.builders.values():
+                        builder.quarantine_first_bucket()
                     symbol_state.last_blocker = "stream_disconnected"
                     symbol_state.orderflow_ready = False
                     symbol_state.density_walls.clear()
@@ -813,6 +839,7 @@ class PaperApp:
     def _merge_detected_levels(self, state: SymbolState, detected: list[Level], now_ms: int) -> None:
         """Merge detector output with durable, absorbing lifecycle state."""
         by_id = {level.level_id: level for level in state.levels}
+        pending = []
         for level in detected:
             prior = by_id.get(level.level_id)
             if prior is not None:
@@ -821,8 +848,9 @@ class PaperApp:
                     revision=max(level.revision, prior.revision),
                     first_seen_at_ms=prior.first_seen_at_ms,
                 )
-            stored = self.journal.upsert_level(self._level_storage_mapping(level, now_ms))
-            by_id[level.level_id] = self._level_from_storage(stored)
+            pending.append(self._level_storage_mapping(level, now_ms))
+        for stored in self.journal.upsert_levels(pending):
+            by_id[str(stored["level_id"])] = self._level_from_storage(stored)
         state.levels = sorted(
             by_id.values(),
             key=lambda item: (item.timeframe, item.confirmed_at_ms, item.level_id),

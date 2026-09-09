@@ -135,6 +135,13 @@ def build_reference_levels(
     timeframe: str,
     now_ms: int | None = None,
     config: GeometryConfig | None = None,
+    persisted_levels: Iterable[Level] = (),
+    tick_size: float | None = None,
+    buffer_ticks: int = 1,
+    fast_timeframe: str = "1m",
+    fast_confirming_closes: int = 2,
+    source_confirming_closes: int = 1,
+    lifecycle_bars: Mapping[str, Sequence[Bar]] | None = None,
 ) -> GeometryResult:
     """Build causal reference levels and coverage metadata.
 
@@ -154,7 +161,17 @@ def build_reference_levels(
     if len(rows) > config.history_limit:
         rows = rows[-config.history_limit :]
     if len(rows) < config.extremum_search_period + config.right_exclusion:
-        return GeometryResult((), coverage)
+        persisted = tuple(persisted_levels)
+        as_of = now_ms if now_ms is not None else (rows[-1].closed_at_ms if rows else None)
+        tombstones = tuple(
+            level for level in persisted
+            if level.broken_at_ms is not None
+            and (as_of is None or level.broken_at_ms <= as_of)
+            and level.timeframe == timeframe
+            and level.level_version == config.level_version
+            and (not rows or level.symbol == rows[0].symbol)
+        )
+        return GeometryResult(tombstones, coverage)
 
     half_left = config.extremum_search_period // 2
     half_right = config.extremum_search_period - half_left - 1
@@ -185,8 +202,98 @@ def build_reference_levels(
                     _candidate_level(pivot, LevelSide.LOW, confirmed_index, rows[confirmed_index].closed_at_ms, timeframe, config)
                 )
 
+    # Lifecycle is deliberately an opt-in input to keep the historical
+    # geometry-only API/replays unchanged.  When supplied, each *constituent*
+    # is broken before clustering.  Clustering first would allow a broken
+    # pivot to be hidden inside a new cluster and become active again when a
+    # later pivot joins that cluster.
+    evaluation_ms = now_ms if now_ms is not None else (rows[-1].closed_at_ms if rows else 0)
+    persisted = tuple(
+        level for level in persisted_levels
+        if level.symbol == (rows[0].symbol if rows else None)
+        and level.timeframe == timeframe
+        and level.level_version == config.level_version
+    )
+    lifecycle_enabled = tick_size is not None or bool(persisted)
+    if lifecycle_enabled:
+        if tick_size is not None and tick_size <= 0:
+            raise ValueError("tick_size must be positive")
+        if fast_confirming_closes < 1 or source_confirming_closes < 1 or buffer_ticks < 1:
+            raise ValueError("lifecycle close and buffer parameters must be positive")
+        from .strategy import apply_level_breaks
+
+        prior_by_id = {
+            level.level_id: level for level in persisted
+            if level.broken_at_ms is not None and level.broken_at_ms <= evaluation_ms
+        }
+        blocked_member_ids = {
+            member_id
+            for level in prior_by_id.values()
+            for member_id in level.provenance.get("member_level_ids", ())
+        }
+        # Preserve an absorbing tombstone by exact constituent ID.  This is
+        # also restart-equivalent when the same bars are replayed.
+        reconciled: list[Level] = []
+        for candidate in candidates:
+            if candidate.level_id in blocked_member_ids:
+                # A broken historical cluster is a tombstone for every
+                # constituent it consumed; do not let a replay recreate one.
+                continue
+            prior = prior_by_id.get(candidate.level_id)
+            if prior is not None and prior.broken_at_ms is not None:
+                candidate = _preserve_break(candidate, prior)
+            reconciled.append(candidate)
+        if tick_size is not None:
+            bars_by_timeframe = dict(lifecycle_bars or {})
+            bars_by_timeframe.setdefault(timeframe, rows)
+            reconciled = apply_level_breaks(
+                reconciled,
+                bars_by_timeframe,
+                evaluation_ms,
+                tick_size=tick_size,
+                buffer_ticks=buffer_ticks,
+                fast_timeframe=fast_timeframe,
+                fast_confirming_closes=fast_confirming_closes,
+                source_confirming_closes=source_confirming_closes,
+            )
+        broken = [level for level in reconciled if level.broken_at_ms is not None]
+        # Include persisted broken constituents which have rolled out of the
+        # current geometry window; consumers can store them as tombstones and
+        # canonical_level_catalog will exclude them from active targets.
+        known_ids = {level.level_id for level in broken}
+        broken.extend(
+            level for level in persisted
+            if level.broken_at_ms is not None
+            and level.broken_at_ms <= evaluation_ms
+            and level.level_id not in known_ids
+        )
+        merged = _merge_candidates(
+            [level for level in reconciled if level.broken_at_ms is None],
+            timeframe,
+            config.tolerance_for(timeframe),
+            config.level_version,
+        )
+        return GeometryResult(tuple(_sort_levels([*broken, *merged])), coverage)
+
     merged = _merge_candidates(candidates, timeframe, config.tolerance_for(timeframe), config.level_version)
     return GeometryResult(tuple(merged), coverage)
+
+
+def _preserve_break(candidate: Level, prior: Level) -> Level:
+    """Copy only absorbing lifecycle fields from a persisted same-ID level."""
+
+    return Level(
+        candidate.level_id, candidate.symbol, candidate.timeframe, candidate.side,
+        candidate.price, candidate.confirmed_at_ms, candidate.touches,
+        candidate.level_class, candidate.origin_at_ms, prior.broken_at_ms,
+        candidate.zone_low, candidate.zone_high, max(candidate.revision, prior.revision),
+        candidate.level_version, candidate.first_seen_at_ms,
+        prior.invalidation_reason, candidate.provenance,
+    )
+
+
+def _sort_levels(levels: Sequence[Level]) -> list[Level]:
+    return sorted(levels, key=lambda item: (item.side.value, item.price, item.origin_at_ms or 0, item.level_id))
 
 
 def reference_levels(
@@ -268,7 +375,7 @@ def _candidate_level(
     timeframe: str,
     config: GeometryConfig,
 ) -> Level:
-    raw = f"{pivot.symbol}:{timeframe}:digash:{side.value}:{pivot.opened_at_ms}:{pivot.high if side is LevelSide.HIGH else pivot.low:.12g}"
+    raw = f"{config.level_version}:{pivot.symbol}:{timeframe}:digash:{side.value}:{pivot.opened_at_ms}:{pivot.high if side is LevelSide.HIGH else pivot.low:.12g}"
     level_id = hashlib.sha256(raw.encode()).hexdigest()[:20]
     price = pivot.high if side is LevelSide.HIGH else pivot.low
     return Level(
@@ -341,7 +448,7 @@ def _merge_candidates(
         prices = [item.price for item in group]
         zone_low, zone_high = min(prices), max(prices)
         ids = sorted(item.level_id for item in group)
-        level_id = hashlib.sha256(f"digash-cluster:{timeframe}:{':'.join(ids)}".encode()).hexdigest()[:20]
+        level_id = hashlib.sha256(f"digash-cluster:{level_version}:{timeframe}:{':'.join(ids)}".encode()).hexdigest()[:20]
         origin = min(item.origin_at_ms or item.confirmed_at_ms for item in group)
         confirmed = max(item.confirmed_at_ms for item in group)
         result.append(

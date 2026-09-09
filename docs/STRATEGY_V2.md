@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen protocol version: v2.5.0, dated 2026-09-09. It introduces one canonical
+Frozen protocol version: v2.5.1, dated 2026-09-09. It introduces one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
 Numerical strategy thresholds are unchanged.
@@ -18,7 +18,7 @@ identifiers:
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.5.0` because target eligibility, level
+The top-level protocol version is `v2.5.1` because target eligibility, level
 lifecycle persistence, and the recorded metric/coverage contract changed. The
 metric and liquidity observations do not participate in trade eligibility.
 The `session_policy` binds a
