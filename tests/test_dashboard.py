@@ -116,6 +116,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('id="paths-count"', html)
         self.assertIn('id="pane-paths"', html)
         self.assertIn("market?.signal_paths", html)
+        self.assertIn(
+            '#readiness-panel,#metrics-panel,#flow-panel,#level-meta,#metrics-chip,.symbol-reason,.tab[data-tab="paths"],.tab[data-tab="shadow"],#pane-paths,#pane-shadow{display:none!important}',
+            html,
+        )
+        self.assertIn(".chart-toolbar{flex-wrap:wrap", html)
+        self.assertIn(".chart-actions{margin-left:auto;flex-wrap:wrap", html)
         self.assertIn("Paper trading", html)
         self.assertIn("Open orders", html)
         self.assertIn("WebSocket", html)
