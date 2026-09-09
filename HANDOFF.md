@@ -57,8 +57,13 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
-- Deployed code commit: `7b765ce522dba255b3a552ae74745b131b269812`.
-- Deployed at: 2026-09-09 16:15 UTC.
+- Deployed code commit: `9a8c930`.
+- Deployed at: 2026-09-09 16:42 UTC.
+- Dashboard-only follow-up: the right workspace now stays within the viewport,
+  the paper-trading panel is pinned to the bottom, and the chart consumes the
+  remaining height. Retired readiness, verified-metrics, active-level-list and
+  orderflow blocks were removed from the operator UI; level rays remain on the
+  chart and research diagnostics remain available through the read-only API.
 - Pre-release database backup:
   `runtime/paper.db.pre-v2.5.1-20260909T161538Z`.
 - Post-deploy checks: container healthy, restart count 0, OOM false,
