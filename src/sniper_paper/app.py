@@ -237,6 +237,10 @@ class PaperApp:
             self.journal.event(_now_ms(), "INFO", "UNIVERSE", f"selected {len(symbols)} symbols", {"symbols": symbols})
             symbol_meta = {item.symbol: item.to_dict() for item in snapshot.selected}
 
+        self.journal.set_meta(
+            "current_evaluation_eligible",
+            "true" if self.evaluation_eligible else "false",
+        )
         missing_meta = [symbol for symbol in symbols if not symbol_meta.get(symbol, {}).get("tick_size")]
         if missing_meta:
             instruments = await asyncio.to_thread(self.client.list_linear_usdt_perpetual_instruments)

@@ -33,3 +33,25 @@ def test_dashboard_surfaces_observation_mode_and_book_readiness(tmp_path: Path) 
     assert "daily rank 1" in result["current_universe"][0]["reason"]
     assert "NATR unavailable" in result["current_universe"][0]["reason"]
     assert result["current_universe"][0]["timeframe"] == "levels 1m / 5m / 15m / 30m / 1h / 4h / 1d"
+
+
+def test_current_session_eligibility_overrides_an_older_universe_protocol(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    journal.record_universe(
+        run_id="u1",
+        selected_at_ms=1,
+        utc_date="2026-09-09",
+        protocol_hash="old",
+        source={"evaluation_eligible": True},
+        members=[
+            {
+                "symbol": "BTCUSDT",
+                "rank": 1,
+                "selected": True,
+                "metrics": {"spread_bps": "1", "depth_notional_top5": "10000"},
+            }
+        ],
+    )
+    journal.set_meta("current_evaluation_eligible", "false")
+
+    assert journal_dashboard(journal)["headline"].startswith("Observation only")

@@ -25,7 +25,12 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
     service_status = "Healthy" if heartbeat_fresh else "Stale"
     data_status = "Fresh" if heartbeat_fresh else "Stale"
     universe_source = raw["universe"][0]["source"] if raw["universe"] else {}
-    observation_only = not bool(universe_source.get("evaluation_eligible", False))
+    current_eligibility = raw["meta"].get("current_evaluation_eligible")
+    observation_only = (
+        current_eligibility != "true"
+        if current_eligibility is not None
+        else not bool(universe_source.get("evaluation_eligible", False))
+    )
     mode = "Observation only" if observation_only else "Forward paper evaluation"
     return {
         "generated_at": now,
