@@ -10,10 +10,15 @@ Last updated: 2026-09-09 (Europe/Kyiv)
 - Remote checkout: `/home/ubuntu/sniper-paper`.
 - Dashboard: loopback-only port `8080` (use an SSH tunnel).
 
-## Release v2.4.0
+## Release v2.5.0
 
-- Canonical durable level catalogue and absorbing broken-level lifecycle.
-- Shadow Digash 1000/40/20 reference geometry; it is not a trade gate.
+- Runtime Digash horizontal levels replace the legacy 15m/4h-only catalogue
+  across `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
+- Each timeframe uses up to 1,000 completed bars, a versioned centred
+  unique-extremum 40-bar hypothesis, a 20-bar right exclusion, documented
+  merge-tolerance endpoints, and a versioned intermediate-tolerance hypothesis.
+- Canonical durable level catalogue and absorbing completed-close broken-level
+  lifecycle; broken levels cannot reactivate after recalculation or restart.
 - Causal observation-only metrics and book-liquidity diagnostics.
 - Independent public-trade TP/SL signal-path tracking.
 - Dashboard level history, metrics, liquidity, versions and TP/SL paths.
@@ -42,13 +47,17 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
-- Deployed code commit: `f40cb52467b8d0e10806c4ee44cee61322f88633`.
-- Deployed at: 2026-09-09 10:49 UTC.
+- Deployed code commit: `f671ef98b393dfb84ebe6d6278113265bff15047`.
+- Deployed at: 2026-09-09 15:47 UTC.
 - Pre-release database backup:
-  `runtime/paper.db.pre-v2.4.0-20260909T1049Z`.
+  `runtime/paper.db.pre-v2.5.0-20260909T154240Z`.
 - Post-deploy checks: container healthy, restart count 0, OOM false,
   WebSocket connected, 8/8 books ready, dashboard HTTP 200, SQLite
-  `integrity_check=ok`, schema version 5.
+  `integrity_check=ok`, schema version 5. Active and broken
+  `digash_horizontal_levels_v1` rows exist on every one of the seven
+  timeframes; the read-only market API exposes only that level version.
+- Capture growth check: completed 15s rows increased from 64,607 to 64,615
+  while the service remained healthy.
 - The 2026-09-09 session is intentionally `partial_day_observation_only`
   because the protocol changed mid-day. Forward evaluation can become eligible
   only after the next complete UTC-day selection and warmup.
