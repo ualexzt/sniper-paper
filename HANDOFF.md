@@ -10,7 +10,17 @@ Last updated: 2026-09-09 (Europe/Kyiv)
 - Remote checkout: `/home/ubuntu/sniper-paper`.
 - Dashboard: loopback-only port `8080` (use an SSH tunnel).
 
-## Release v2.5.0
+## Release v2.5.1
+
+- Fixes the v2.5.0 cluster-resurrection defect by invalidating constituents
+  before merging and retaining broken-cluster member tombstones. Runtime
+  level version is `digash_horizontal_levels_v2`; IDs include the version,
+  preserving prior rows for audit.
+- Requests historical bars strictly before the current forming bucket.
+  Startup/reconnect partial receive-time buckets are suppressed. This can
+  leave explicit history gaps until the next exchange-history bootstrap.
+- OHLCV aggregation is incremental with bounded deduplication; SQLite level
+  upserts share one transaction per batch instead of one per level.
 
 - Runtime Digash horizontal levels replace the legacy 15m/4h-only catalogue
   across `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
@@ -47,17 +57,24 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
-- Deployed code commit: `f671ef98b393dfb84ebe6d6278113265bff15047`.
-- Deployed at: 2026-09-09 15:47 UTC.
+- Deployed code commit: `7b765ce522dba255b3a552ae74745b131b269812`.
+- Deployed at: 2026-09-09 16:15 UTC.
 - Pre-release database backup:
-  `runtime/paper.db.pre-v2.5.0-20260909T154240Z`.
+  `runtime/paper.db.pre-v2.5.1-20260909T161538Z`.
 - Post-deploy checks: container healthy, restart count 0, OOM false,
   WebSocket connected, 8/8 books ready, dashboard HTTP 200, SQLite
   `integrity_check=ok`, schema version 5. Active and broken
-  `digash_horizontal_levels_v1` rows exist on every one of the seven
+  `digash_horizontal_levels_v2` rows exist on every one of the seven
   timeframes; the read-only market API exposes only that level version.
-- Capture growth check: completed 15s rows increased from 64,607 to 64,615
-  while the service remained healthy.
+- Capture growth check: completed 15s rows increased from 65,337 to 65,361.
+  New-process heartbeats were 30 seconds apart, books 8/8, HTTP health 200.
+  CPU snapshots decreased from about 100% before deployment to 24% and 20%
+  after deployment. These are short operational checks, not a long soak test.
+- Local regression suite and Ruff passed. Independent reproductions cover
+  constituent/cluster resurrection, restart, version isolation, source-vs-fast
+  closes, incomplete buckets and batched durable upserts. An 8,000-trade bar
+  benchmark decreased from 5.21s to 0.039s; 1,000 unchanged level upserts took
+  0.023s in a batch versus 0.361s individually on the local machine.
 - The 2026-09-09 session is intentionally `partial_day_observation_only`
   because the protocol changed mid-day. Forward evaluation can become eligible
   only after the next complete UTC-day selection and warmup.
