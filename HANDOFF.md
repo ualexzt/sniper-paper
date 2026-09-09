@@ -39,3 +39,16 @@ The remote public stream has shown recurring disconnect/reconnect events. A
 disconnect invalidates books, makes pending entries `MISSED`, and closes active
 signal paths as `UNKNOWN`. Treat reconnect frequency as an independent data
 quality/evaluation blocker until it is separately diagnosed.
+
+## Current deployment
+
+- Deployed code commit: `f40cb52467b8d0e10806c4ee44cee61322f88633`.
+- Deployed at: 2026-09-09 10:49 UTC.
+- Pre-release database backup:
+  `runtime/paper.db.pre-v2.4.0-20260909T1049Z`.
+- Post-deploy checks: container healthy, restart count 0, OOM false,
+  WebSocket connected, 8/8 books ready, dashboard HTTP 200, SQLite
+  `integrity_check=ok`, schema version 5.
+- The 2026-09-09 session is intentionally `partial_day_observation_only`
+  because the protocol changed mid-day. Forward evaluation can become eligible
+  only after the next complete UTC-day selection and warmup.
