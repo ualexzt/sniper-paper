@@ -13,6 +13,7 @@ from sniper_paper.strategy_v2 import (
     LevelSide,
     OrderflowFrame,
     StrategyV2Evaluator,
+    _cascade_geometry,
     _nearest_target,
 )
 
@@ -301,6 +302,102 @@ def test_nearest_target_skips_levels_broken_as_of_evaluation_time() -> None:
     assert target.level_id == "active"
 
 
+def test_nearest_target_can_reference_level_active_before_trigger_break() -> None:
+    levels = [
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.8, 0, broken_at_ms=60_000),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.85, 0, broken_at_ms=60_000),
+    ]
+    target = _nearest_target(
+        levels,
+        symbol="XUSDT",
+        side=Side.LONG,
+        price=100.0,
+        now_ms=75_000,
+        active_as_of_ms=59_999,
+        timeframes={"15m"},
+        canonical=True,
+    )
+    assert target is not None
+    assert target.level_class == "cluster"
+    assert target.price == pytest.approx(100.8)
+    assert _nearest_target(
+        levels,
+        symbol="XUSDT",
+        side=Side.LONG,
+        price=100.0,
+        now_ms=75_000,
+        timeframes={"15m"},
+        canonical=True,
+    ) is None
+
+
+def test_terminal_lane_can_trade_the_first_break_but_not_reuse_the_level() -> None:
+    bars = {
+        "1m": [
+            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
+            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
+        ]
+    }
+    levels = [
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
+    ]
+    frame = OrderflowFrame(
+        symbol="XUSDT",
+        received_at_ms=120_000,
+        best_bid=100.90,
+        best_bid_size=10.0,
+        best_ask=100.91,
+        best_ask_size=5.0,
+        delta_notional=20.0,
+        median_abs_delta_20=5.0,
+        range_bp=20.0,
+        median_range_bp_20=10.0,
+        top5_bid_notional=2_000.0,
+        top5_ask_notional=1_000.0,
+        atr_1m=0.5,
+        book_age_ms=10,
+        spread_bp=1.0,
+    )
+    evaluator = StrategyV2Evaluator(min_risk_bp=1.0, max_risk_bp=200.0)
+
+    first = decision(
+        evaluator.evaluate(symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame),
+        LaneName.TERMINAL_LEVEL_BREAKOUT.value,
+    )
+    later = decision(
+        StrategyV2Evaluator(min_risk_bp=1.0, max_risk_bp=200.0).evaluate(
+            symbol="XUSDT",
+            now_ms=180_000,
+            bars=bars,
+            levels=levels,
+            orderflow=replace(frame, received_at_ms=180_000),
+        ),
+        LaneName.TERMINAL_LEVEL_BREAKOUT.value,
+    )
+
+    assert first.status == DecisionStatus.TRIGGERED.value
+    assert first.target_level is not None
+    assert first.target_level.level_class == "cluster"
+    assert later.status == DecisionStatus.REJECTED.value
+
+
+def test_cascade_geometry_records_ordered_distinct_levels_without_a_hidden_gate() -> None:
+    levels = [
+        Level("near", "XUSDT", "4h", LevelSide.HIGH, 101.0, 0),
+        Level("far", "XUSDT", "4h", LevelSide.HIGH, 103.0, 0),
+        Level("behind", "XUSDT", "4h", LevelSide.LOW, 99.0, 0),
+    ]
+
+    result = _cascade_geometry(levels, symbol="XUSDT", side=Side.LONG, price=100.0, now_ms=1)
+
+    assert result["cascade_count"] == 2.0
+    assert result["cascade_level_ids"] == "near,far"
+    assert result["cascade_first_level_id"] == "near"
+    assert result["cascade_last_level_id"] == "far"
+    assert result["cascade_total_span_bp"] == pytest.approx((103 / 101 - 1) * 10_000)
+
+
 def test_failed_sweep_lane_cannot_reuse_broken_structural_level() -> None:
     fixture = build_failed_sweep_fixture()
     broken_levels = [replace(fixture["levels"][0], broken_at_ms=900_000)]
@@ -376,6 +473,33 @@ def test_failed_sweep_is_symmetric() -> None:
     assert short_decision.side is Side.SHORT
     assert mirror_price(long_decision.stop_price) == pytest.approx(short_decision.stop_price)
     assert mirror_price(long_decision.target_price) == pytest.approx(short_decision.target_price)
+
+
+def test_failed_sweep_confirmation_uses_delta_baseline_frozen_at_arm() -> None:
+    fixture = build_failed_sweep_fixture()
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    evaluator.evaluate(
+        symbol="XUSDT",
+        now_ms=fixture["arm_now"],
+        bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
+        levels=fixture["levels"],
+        orderflow=fixture["arm_frame"],
+    )
+    changed_baseline = replace(fixture["confirm_frame"], median_abs_delta_20=1_000.0)
+
+    result = decision(
+        evaluator.evaluate(
+            symbol="XUSDT",
+            now_ms=fixture["confirm_now"],
+            bars=fixture["bars"],
+            levels=fixture["levels"],
+            orderflow=changed_baseline,
+        ),
+        LaneName.FAILED_SWEEP_RECLAIM.value,
+    )
+
+    assert result.status == DecisionStatus.TRIGGERED.value
+    assert result.features["confirmation_frozen_delta_baseline"] == 20.0
 
 
 def test_one_attempt_turns_repeat_into_missed() -> None:

@@ -35,17 +35,19 @@ For a plain-language Ukrainian explanation, see
   best price, waits behind displayed queue, uses only exact-price opposing
   public trades for fills, supports partial fills, and cancels the remainder
   after a two-second TTL. Book cancellations never invent a fill.
-- SQLite schema v2 stores the frozen universe and instrument increments, bars,
-  actionable decisions, paper orders/queue state, positions, costs, P&L, and
-  service events across restarts.
+- SQLite schema v5 stores the frozen universe and instrument increments, bars,
+  durable level lifecycle/history, actionable decisions, independent TP/SL
+  signal paths, paper orders/queue state, positions, costs, P&L, and service
+  events across restarts.
 - A stream break invalidates every book and any pending entry becomes `MISSED`;
   trading waits for a new snapshot and warmup.
 - The read-only trading dashboard has a daily-universe sidebar, selectable
-  5m/15m/4h candlestick chart with causal 15m clusters, previous-day levels,
-  4h swings and paper brackets, plus Paper trading, Open orders and History
-  tabs. Its header reports server heartbeat, public WebSocket state and book
-  readiness; a prominent READY/BLOCKED gate and compact order-flow panel make
-  the current eligibility, warmup, delta, microprice and DOM evidence visible.
+  1m/5m/15m/4h candlestick chart with causal 15m clusters, previous-day levels,
+  4h swings and paper brackets, plus Paper trading, TP/SL paths, Open orders,
+  History and Shadow tabs. It also shows metric coverage, $50k/current-order
+  book-impact observations, active/broken level metadata and immutable session
+  versions. Its header reports server heartbeat, public WebSocket, book and
+  metric readiness.
 - The chart supports cursor-centered wheel zoom, pointer/touch drag panning,
   arrow/zoom controls and reset. Horizontal level rays begin at their actual
   pivot candle (or the price-defining pivot of a cluster) and extend right.

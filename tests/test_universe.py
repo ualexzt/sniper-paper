@@ -166,6 +166,26 @@ class UniverseTransport:
                         "a": [["10.9", "1"], ["11", "1"]],
                     },
                 }
+        if path == "/v5/market/kline":
+            end = int(params["end"])
+            current_open = end // 300_000 * 300_000
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        [
+                            str(current_open - index * 300_000),
+                            "100",
+                            "102",
+                            "99",
+                            "101",
+                            "10",
+                            "1010",
+                        ]
+                        for index in range(16)
+                    ]
+                },
+            }
         raise AssertionError(f"unexpected call: {method} {path} {params}")
 
 
@@ -204,6 +224,24 @@ def test_daily_selector_ranks_from_public_ticker_and_orderbook_fields_and_record
     assert payload["selected"][0]["symbol"] == "BTCUSDT"
     assert payload["selected"][0]["tick_size"] == "0.5"
     assert "trade-count" in payload["notes"][2]
+    # Liquidity observations are additive and do not participate in ranking.
+    assert [(item["symbol"], item["rank"]) for item in payload["selected"]] == [
+        ("BTCUSDT", 1),
+        ("ETHUSDT", 2),
+    ]
+    btc_liquidity = payload["selected"][0]["liquidity_diagnostics"]
+    eth_liquidity = payload["selected"][1]["liquidity_diagnostics"]
+    assert btc_liquidity["quote_notional"] == 50_000.0
+    assert btc_liquidity["status"] == "insufficient"
+    assert btc_liquidity["buy"]["complete_depth"] is False
+    assert btc_liquidity["buy"]["vwap_price"] != eth_liquidity["buy"]["vwap_price"]
+    assert btc_liquidity["buy"]["marginal_impact_bps"] != eth_liquidity["buy"]["marginal_impact_bps"]
+    assert payload["selected"][0]["natr_diagnostics"]["available"] is True
+    assert payload["selected"][0]["natr_diagnostics"]["samples"] == 14
+    assert payload["selected"][0]["natr_diagnostics"]["ranking_input"] is False
+    assert payload["selected"][0]["price24h_pcnt"] == "0.012"
+    assert payload["selected"][0]["price_change_24h_pct"] == "1.200"
+    assert payload["excluded"][0]["liquidity_diagnostics"]["status"] == "unavailable"
 
 
 def test_daily_snapshot_is_json_serializable():
@@ -222,3 +260,35 @@ def test_daily_snapshot_is_json_serializable():
     json_blob = snapshot.to_json()
     assert '"selection_day_utc": "2026-09-07"' in json_blob
     assert '"ranked_below_daily_cap"' in json_blob
+
+
+def test_daily_natr_excludes_forming_bar_and_reports_gap_without_changing_rank() -> None:
+    class GappedKlineTransport(UniverseTransport):
+        def __call__(self, method: str, path: str, params: dict[str, object]):
+            if path != "/v5/market/kline":
+                return super().__call__(method, path, params)
+            end = int(params["end"])
+            current_open = end // 300_000 * 300_000
+            # Index zero is forming and filtered. One completed interval is
+            # absent, so the metric must fail closed instead of interpolating.
+            rows = [
+                [str(current_open - index * 300_000), "100", "102", "99", "101", "10", "1010"]
+                for index in range(17)
+                if index != 5
+            ]
+            return {"retCode": 0, "result": {"list": rows}}
+
+    selector = DailyUniverseSelector(
+        BybitPublicClient(transport=GappedKlineTransport()),
+        max_symbols=2,
+        orderbook_limit=25,
+        depth_levels=3,
+        max_spread_bps="1000",
+        min_depth_notional_top5="0",
+    )
+
+    snapshot = selector.build_snapshot(now=datetime(2026, 9, 7, 0, 5, tzinfo=UTC))
+
+    assert [item.symbol for item in snapshot.selected] == ["BTCUSDT", "ETHUSDT"]
+    assert snapshot.selected[0].natr_diagnostics["available"] is False
+    assert snapshot.selected[0].natr_diagnostics["reason"] == "missing_bar_in_window"

@@ -58,7 +58,7 @@ def journal_dashboard(journal: Journal) -> dict[str, Any]:
         "current_universe": [
             {
                 "symbol": row["symbol"],
-                "reason": f"daily rank {row['rank']} · {mode.lower()}",
+                "reason": _universe_reason(row["rank"], row["metrics"], mode),
                 "spread_bp": f"{float(row['metrics'].get('spread_bps') or 0):.2f} bp",
                 "depth": f"${float(row['metrics'].get('depth_notional_top5') or 0):,.0f}",
                 "timeframe": "1m / 5m / 15m / 4h",
@@ -109,3 +109,18 @@ def _stamp(value: int) -> str:
 
 def _number(value: float) -> str:
     return f"{value:.10g}"
+
+
+def _universe_reason(rank: int, metrics: dict[str, Any], mode: str) -> str:
+    turnover = float(metrics.get("turnover24h") or 0)
+    change = metrics.get("price_change_24h_pct")
+    natr = metrics.get("natr_diagnostics") or {}
+    natr_text = (
+        f"NATR {float(natr['value']):.2f}%"
+        if natr.get("available") and natr.get("value") is not None
+        else f"NATR {natr.get('reason', 'unavailable')}"
+    )
+    change_text = f"{float(change):+.2f}%" if change is not None else "change unavailable"
+    return (
+        f"daily rank {rank} · turnover ${turnover:,.0f} · {change_text} · {natr_text} · {mode.lower()}"
+    )

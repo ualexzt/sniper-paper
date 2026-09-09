@@ -1,3 +1,4 @@
+from sniper_paper.levels import canonical_level_catalog, level_active_at
 from sniper_paper.market import Bar
 from sniper_paper.paper import Side
 from sniper_paper.strategy import (
@@ -9,10 +10,12 @@ from sniper_paper.strategy import (
     current_display_levels,
     previous_utc_day_levels,
 )
+from sniper_paper.strategy_v2 import Level as V2Level
+from sniper_paper.strategy_v2 import LevelSide as V2LevelSide
 
 
-def bar(tf: int, opened: int, o: float, h: float, l: float, c: float, delta: float = 1) -> Bar:
-    return Bar("XUSDT", tf, opened, opened + tf, o, h, l, c, 1, delta, 1)
+def bar(tf: int, opened: int, o: float, h: float, low: float, c: float, delta: float = 1) -> Bar:
+    return Bar("XUSDT", tf, opened, opened + tf, o, h, low, c, 1, delta, 1)
 
 
 def test_level_is_confirmed_only_after_two_right_bars() -> None:
@@ -69,6 +72,14 @@ def test_previous_day_levels_are_not_known_before_day_boundary() -> None:
     assert {level.origin_at_ms for level in levels} == {bars[-1].opened_at_ms}
 
 
+def test_previous_day_levels_require_a_complete_contiguous_utc_day() -> None:
+    day = 86_400_000
+    bars = [bar(900_000, day + i * 900_000, 10, 12, 8, 10) for i in range(96)]
+
+    assert previous_utc_day_levels("XUSDT", bars[:-1], 2 * day) == []
+    assert previous_utc_day_levels("XUSDT", bars[:20] + bars[21:], 2 * day) == []
+
+
 def test_display_levels_keep_4h_and_clustered_15m_not_single_pivots() -> None:
     levels = [
         Level("h4", "XUSDT", "4h", LevelSide.HIGH, 110, 1),
@@ -79,7 +90,36 @@ def test_display_levels_keep_4h_and_clustered_15m_not_single_pivots() -> None:
     result = current_display_levels(levels, "XUSDT", 100, 10)
     assert {level.level_class for level in result} == {"swing", "cluster"}
     assert all(level.level_id != "noise" for level in result)
-    assert next(level for level in result if level.level_class == "cluster").origin_at_ms == 10
+    cluster = next(level for level in result if level.level_class == "cluster")
+    assert cluster.origin_at_ms == 10
+    assert cluster.first_seen_at_ms == 2
+
+
+def test_level_model_and_catalog_are_shared_by_both_strategy_lanes() -> None:
+    assert Level is V2Level
+    assert LevelSide is V2LevelSide
+    levels = [
+        Level("h4", "XUSDT", "4h", LevelSide.HIGH, 110, 1),
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 105.00, 1, origin_at_ms=10),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 105.05, 2, origin_at_ms=20),
+        Level("single", "XUSDT", "15m", LevelSide.HIGH, 106.0, 1),
+        Level("old", "XUSDT", "4h", LevelSide.HIGH, 109, 1, broken_at_ms=5),
+    ]
+    catalog = canonical_level_catalog(levels, "XUSDT", 10)
+    assert {level.level_class for level in catalog} == {"swing", "cluster"}
+    assert {level.level_id for level in catalog} == {
+        level.level_id for level in canonical_level_catalog(levels, "XUSDT", 10)
+    }
+    assert any(level.level_class == "cluster" for level in catalog)
+    assert all(level.level_id != "single" for level in catalog)
+
+
+def test_level_active_at_supports_pre_event_reference_without_reactivation() -> None:
+    level = Level("break", "XUSDT", "15m", LevelSide.HIGH, 100.0, 0, broken_at_ms=120)
+    assert not level_active_at(level, 120)
+    assert level_active_at(level, 119)
+    assert level.status_at_ms(119) == "active"
+    assert level.status_at_ms(120) == "broken"
 
 
 def test_wick_and_single_fast_close_do_not_break_level() -> None:

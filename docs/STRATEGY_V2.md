@@ -1,6 +1,32 @@
 # Strategy V2
 
-Frozen specification version: v2.2.3, dated 2026-09-08.
+Frozen protocol version: v2.4.0, dated 2026-09-09. It introduces one canonical
+level model/catalogue for target selection, durable absorbing level lifecycle,
+provenance/session binding, and threshold-free Digash metric observations.
+Numerical strategy thresholds are unchanged.
+
+## Immutable provenance and sessions
+
+`paper_strategy_v2.json` contains a top-level `versions` mapping. Every signal,
+paper order, and evaluation session must be attributable to these immutable
+identifiers:
+
+- `strategy`: `v2.3.0`, the canonical-target lane behavior with unchanged thresholds;
+- `level`: the causal level lifecycle and geometry contract;
+- `universe`: `daily_universe_v2_shadow_metrics`, the once-daily UTC selector
+  contract with recorded $50k liquidity diagnostics;
+- `execution`: the paper queue, fill, cost, and bracket contract;
+- `source_data_contract`: the public Bybit market-data and causal-input contract.
+
+The top-level protocol version is `v2.4.0` because target eligibility, level
+lifecycle persistence, and the recorded metric/coverage contract changed. The
+metric and liquidity observations do not participate in trade eligibility.
+The `session_policy` binds a
+session to `{utc_date}:{protocol_sha256}` and requires a new session whenever
+the protocol hash changes. A late-start `partial_day_bootstrap` remains
+observation-only; evaluation begins on the next complete UTC day. These fields
+are descriptive provenance and cannot enable authenticated orders or alter the
+public-data-only/paper-only safety boundary.
 
 This document defines the paper-only v2 evaluator foundation. It does not place
 orders, does not depend on the live app parser, and only consumes immutable

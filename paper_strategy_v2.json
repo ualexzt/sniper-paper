@@ -1,7 +1,22 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.2.3",
+  "version": "v2.4.0",
   "status": "frozen_spec",
+  "versions": {
+    "strategy": "v2.3.0",
+    "level": "canonical_level_catalog_v1",
+    "universe": "daily_universe_v2_shadow_metrics",
+    "execution": "paper_execution_v1",
+    "source_data_contract": "bybit_public_market_data_v1"
+  },
+  "session_policy": {
+    "session_id_format": "{utc_date}:{protocol_sha256}",
+    "version_binding": "protocol_sha256",
+    "new_session_on_version_change": true,
+    "partial_day_bootstrap": "observation_only",
+    "evaluation_eligibility": "complete_utc_day_after_anchor",
+    "protocol_hash_required": true
+  },
   "safety_boundary": {
     "public_market_data_only": true,
     "separate_server_and_repository": true,
@@ -25,6 +40,26 @@
     "execution_link_allowed": false,
     "persist_separately_from_signals": true,
     "lanes": ["retest_reclaim_v1", "density_bounce_v1", "cascade_terminal_exit"]
+  },
+  "metrics_observation_policy": {
+    "trade_gate_enabled": false,
+    "completed_bars_only": true,
+    "natr": "mean_true_range_5m_14_over_latest_close_pct",
+    "price_change_24h": "latest_close_over_open_1440m_ago_pct",
+    "dollar_volume_24h": "sum_base_volume_times_close_fallback",
+    "volume_splash_2h": "latest_completed_5m_volume_over_previous_24_bar_mean",
+    "btc_correlation_6h": "pearson_close_previous_close_log_returns_5m",
+    "liquidity_quote_notional_usd": 50000,
+    "liquidity_reference": "mid",
+    "liquidity_threshold": null
+  },
+  "signal_path_policy": {
+    "version": "signal_path_tracker_v1",
+    "horizon_ms": 86400000,
+    "source": "public_trade_ticks",
+    "execution_link_allowed": false,
+    "restart_without_tick_buffer": "UNKNOWN",
+    "same_bar_without_trade_order": "AMBIGUOUS"
   },
   "execution_policy": {
     "mode": "paper",

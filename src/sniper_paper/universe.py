@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .bybit_public import BybitPublicClient, BybitPublicError
+from .liquidity import calculate_liquidity_impact
+from .market import Bar
+from .metrics import natr_5m_14
+
+LIQUIDITY_DIAGNOSTIC_QUOTE_NOTIONAL = 50_000.0
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -61,11 +66,14 @@ class UniverseExclusion:
     turnover24h: Decimal | None = None
     volume24h: Decimal | None = None
     abs_price24h_pcnt: Decimal | None = None
+    price24h_pcnt: Decimal | None = None
     spread_bps: Decimal | None = None
     depth_notional_top5: Decimal | None = None
     tick_size: Decimal | None = None
     qty_step: Decimal | None = None
     min_order_qty: Decimal | None = None
+    liquidity_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    natr_diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,11 +82,17 @@ class UniverseExclusion:
             "turnover24h": _decimal_to_json(self.turnover24h),
             "volume24h": _decimal_to_json(self.volume24h),
             "abs_price24h_pcnt": _decimal_to_json(self.abs_price24h_pcnt),
+            "price24h_pcnt": _decimal_to_json(self.price24h_pcnt),
+            "price_change_24h_pct": _decimal_to_json(
+                None if self.price24h_pcnt is None else self.price24h_pcnt * Decimal(100)
+            ),
             "spread_bps": _decimal_to_json(self.spread_bps),
             "depth_notional_top5": _decimal_to_json(self.depth_notional_top5),
             "tick_size": _decimal_to_json(self.tick_size),
             "qty_step": _decimal_to_json(self.qty_step),
             "min_order_qty": _decimal_to_json(self.min_order_qty),
+            "liquidity_diagnostics": dict(self.liquidity_diagnostics),
+            "natr_diagnostics": dict(self.natr_diagnostics),
         }
 
 
@@ -95,6 +109,9 @@ class UniverseSelection:
     tick_size: Decimal
     qty_step: Decimal
     min_order_qty: Decimal
+    price24h_pcnt: Decimal | None = None
+    liquidity_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    natr_diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,11 +121,17 @@ class UniverseSelection:
             "turnover24h": _decimal_to_json(self.turnover24h),
             "volume24h": _decimal_to_json(self.volume24h),
             "abs_price24h_pcnt": _decimal_to_json(self.abs_price24h_pcnt),
+            "price24h_pcnt": _decimal_to_json(self.price24h_pcnt),
+            "price_change_24h_pct": _decimal_to_json(
+                None if self.price24h_pcnt is None else self.price24h_pcnt * Decimal(100)
+            ),
             "spread_bps": _decimal_to_json(self.spread_bps),
             "depth_notional_top5": _decimal_to_json(self.depth_notional_top5),
             "tick_size": _decimal_to_json(self.tick_size),
             "qty_step": _decimal_to_json(self.qty_step),
             "min_order_qty": _decimal_to_json(self.min_order_qty),
+            "liquidity_diagnostics": dict(self.liquidity_diagnostics),
+            "natr_diagnostics": dict(self.natr_diagnostics),
         }
 
 
@@ -150,7 +173,7 @@ class DailyUniverseSelector:
         depth_levels: int = 5,
         max_spread_bps: Decimal | str = "20",
         min_depth_notional_top5: Decimal | str = "1000",
-        selector_version: str = "bybit-public-universe-v1",
+        selector_version: str = "bybit-public-universe-v2-shadow-metrics",
     ) -> None:
         self._client = client
         self._max_symbols = max_symbols
@@ -237,9 +260,12 @@ class DailyUniverseSelector:
                         turnover24h=turnover,
                         volume24h=volume,
                         abs_price24h_pcnt=abs_move,
+                        price24h_pcnt=move,
                         tick_size=tick_size,
                         qty_step=qty_step,
                         min_order_qty=min_order_qty,
+                        liquidity_diagnostics=_unavailable_liquidity("not_orderbook_candidate"),
+                        natr_diagnostics=_unavailable_natr("not_kline_candidate"),
                     )
                 )
                 continue
@@ -250,6 +276,7 @@ class DailyUniverseSelector:
                     "turnover24h": turnover,
                     "volume24h": volume,
                     "abs_price24h_pcnt": abs_move,
+                    "price24h_pcnt": move,
                     "tick_size": tick_size,
                     "qty_step": qty_step,
                     "min_order_qty": min_order_qty,
@@ -279,6 +306,7 @@ class DailyUniverseSelector:
         )
         pool_size = max(self._max_symbols, self._max_symbols * self._candidate_pool_multiplier)
         eligible: list[dict[str, Any]] = []
+        cutoff_ms = int(current.timestamp() * 1000)
         for item in preliminary[:pool_size]:
             orderbook_payload = self._client.get_orderbook(
                 symbol=item["symbol"], category="linear", limit=self._orderbook_limit
@@ -286,10 +314,13 @@ class DailyUniverseSelector:
             orderbook_result = orderbook_payload.get("result", {})
             if not isinstance(orderbook_result, dict):
                 spread_bps, depth_notional_top5, orderbook_reason = None, None, "missing_orderbook"
+                liquidity_diagnostics = _unavailable_liquidity("missing_orderbook")
             else:
                 spread_bps, depth_notional_top5, orderbook_reason = _orderbook_metrics(
                     orderbook_result, depth_levels=self._depth_levels
                 )
+                liquidity_diagnostics = _liquidity_diagnostics(orderbook_result)
+            natr_diagnostics = _natr_diagnostics(self._client, item["symbol"], cutoff_ms)
             reasons = [orderbook_reason] if orderbook_reason else []
             if spread_bps is None:
                 reasons.append("missing_spread")
@@ -312,10 +343,21 @@ class DailyUniverseSelector:
                         tick_size=item["tick_size"],
                         qty_step=item["qty_step"],
                         min_order_qty=item["min_order_qty"],
+                        liquidity_diagnostics=liquidity_diagnostics,
+                        natr_diagnostics=natr_diagnostics,
+                        price24h_pcnt=item["price24h_pcnt"],
                     )
                 )
             else:
-                eligible.append({**item, "spread_bps": spread_bps, "depth_notional_top5": depth_notional_top5})
+                eligible.append(
+                    {
+                        **item,
+                        "spread_bps": spread_bps,
+                        "depth_notional_top5": depth_notional_top5,
+                        "liquidity_diagnostics": liquidity_diagnostics,
+                        "natr_diagnostics": natr_diagnostics,
+                    }
+                )
         for item in preliminary[pool_size:]:
             excluded.append(
                 UniverseExclusion(
@@ -324,9 +366,12 @@ class DailyUniverseSelector:
                     turnover24h=item["turnover24h"],
                     volume24h=item["volume24h"],
                     abs_price24h_pcnt=item["abs_price24h_pcnt"],
+                    price24h_pcnt=item["price24h_pcnt"],
                     tick_size=item["tick_size"],
                     qty_step=item["qty_step"],
                     min_order_qty=item["min_order_qty"],
+                    liquidity_diagnostics=_unavailable_liquidity("outside_orderbook_candidate_pool"),
+                    natr_diagnostics=_unavailable_natr("outside_kline_candidate_pool"),
                 )
             )
 
@@ -379,6 +424,9 @@ class DailyUniverseSelector:
                     tick_size=item["tick_size"],
                     qty_step=item["qty_step"],
                     min_order_qty=item["min_order_qty"],
+                    price24h_pcnt=item["price24h_pcnt"],
+                    liquidity_diagnostics=item.get("liquidity_diagnostics", {}),
+                    natr_diagnostics=item.get("natr_diagnostics", {}),
                 )
             )
 
@@ -395,6 +443,9 @@ class DailyUniverseSelector:
                     tick_size=item["tick_size"],
                     qty_step=item["qty_step"],
                     min_order_qty=item["min_order_qty"],
+                    price24h_pcnt=item["price24h_pcnt"],
+                    liquidity_diagnostics=item.get("liquidity_diagnostics", {}),
+                    natr_diagnostics=item.get("natr_diagnostics", {}),
                 )
             )
 
@@ -402,6 +453,7 @@ class DailyUniverseSelector:
             "public REST only",
             "selection uses turnover24h, volume24h, abs(price24hPcnt), spread, and depth from public endpoints",
             "trade-count is not exposed by the public linear ticker or kline discovery endpoints, so it is not part of the selector",
+            "NATR 5m/14 and signed 24h return are recorded as observations and do not change ranking or gates",
             "no intraday additions after the daily snapshot",
         )
         return DailyUniverseSnapshot(
@@ -449,3 +501,122 @@ def _orderbook_metrics(
             depth += price * size
 
     return spread_bps, depth, None
+
+
+def _unavailable_liquidity(reason: str) -> dict[str, Any]:
+    return {
+        "quote_notional": LIQUIDITY_DIAGNOSTIC_QUOTE_NOTIONAL,
+        "status": "unavailable",
+        "reason": reason,
+        "top_of_book_spread_bps": None,
+        "buy": None,
+        "sell": None,
+    }
+
+
+def _unavailable_natr(reason: str, samples: int = 0) -> dict[str, Any]:
+    return {
+        "value": None,
+        "samples": samples,
+        "expected_samples": 14,
+        "coverage": min(1.0, samples / 14),
+        "reason": reason,
+        "available": False,
+        "timeframe": "5m",
+        "period": 14,
+        "ranking_input": False,
+    }
+
+
+def _natr_diagnostics(client: BybitPublicClient, symbol: str, cutoff_ms: int) -> dict[str, Any]:
+    """Fetch a bounded completed-bar NATR observation for the daily snapshot."""
+
+    try:
+        payload = client.get_kline(symbol=symbol, interval="5", category="linear", limit=16, end=cutoff_ms)
+    except BybitPublicError as exc:
+        return _unavailable_natr(f"public_kline_error:{type(exc).__name__}")
+    rows = payload.get("result", {}).get("list", [])
+    if not isinstance(rows, list):
+        return _unavailable_natr("invalid_kline_payload")
+    bars: list[Bar] = []
+    for row in reversed(rows):
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        try:
+            opened = int(row[0])
+            if opened + 300_000 > cutoff_ms:
+                continue
+            bars.append(
+                Bar(
+                    symbol=symbol,
+                    timeframe_ms=300_000,
+                    opened_at_ms=opened,
+                    closed_at_ms=opened + 300_000,
+                    open=float(row[1]),
+                    high=float(row[2]),
+                    low=float(row[3]),
+                    close=float(row[4]),
+                    volume=float(row[5]),
+                    delta_notional=0.0,
+                    trades=0,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    result = natr_5m_14(bars, now_ms=cutoff_ms)
+    return {
+        **asdict(result),
+        "available": result.available,
+        "timeframe": "5m",
+        "period": 14,
+        "ranking_input": False,
+    }
+
+
+def _liquidity_diagnostics(orderbook_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return raw $50k impact observations without affecting selector gates."""
+    bids = orderbook_row.get("b")
+    asks = orderbook_row.get("a")
+    if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
+        return _unavailable_liquidity("invalid_orderbook")
+    try:
+        bid_levels = [(float(row[0]), float(row[1])) for row in bids]
+        ask_levels = [(float(row[0]), float(row[1])) for row in asks]
+    except (TypeError, ValueError, IndexError):
+        return _unavailable_liquidity("invalid_orderbook_depth")
+    best_bid = bid_levels[0][0]
+    best_ask = ask_levels[0][0]
+    if best_bid <= 0 or best_ask <= 0:
+        return _unavailable_liquidity("invalid_orderbook_prices")
+    spread_bps = ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10_000
+    results = {
+        side: calculate_liquidity_impact(
+            bid_levels,
+            ask_levels,
+            LIQUIDITY_DIAGNOSTIC_QUOTE_NOTIONAL,
+            side=side,
+            reference="mid",
+        )
+        for side in ("buy", "sell")
+    }
+    complete = all(item.complete_depth for item in results.values())
+    return {
+        "quote_notional": LIQUIDITY_DIAGNOSTIC_QUOTE_NOTIONAL,
+        "status": "complete" if complete else "insufficient",
+        "reason": "ok" if complete else "insufficient_depth",
+        "top_of_book_spread_bps": spread_bps,
+        **{
+            side: {
+                "reference": item.reference,
+                "reference_price": item.reference_price,
+                "vwap_price": item.vwap_price,
+                "impact_bps": item.impact_bps,
+                "marginal_impact_bps": item.marginal_impact_bps,
+                "consumed_base_qty": item.consumed_base_qty,
+                "consumed_notional": item.consumed_notional,
+                "complete_depth": item.complete_depth,
+                "reason": item.reason,
+            }
+            for side, item in results.items()
+        },
+    }

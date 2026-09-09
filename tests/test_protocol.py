@@ -58,3 +58,29 @@ def test_protocol_parser_rejects_lane_shape_drift() -> None:
 
     with pytest.raises(ProtocolError, match="lane has unexpected keys"):
         load_protocol_dict(payload)
+
+
+def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
+    v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
+    payload = json.loads(v2_path.read_text(encoding="utf-8"))
+
+    assert payload["version"] == "v2.4.0"
+    assert payload["versions"] == {
+        "strategy": "v2.3.0",
+        "level": "canonical_level_catalog_v1",
+        "universe": "daily_universe_v2_shadow_metrics",
+        "execution": "paper_execution_v1",
+        "source_data_contract": "bybit_public_market_data_v1",
+    }
+    assert payload["session_policy"] == {
+        "session_id_format": "{utc_date}:{protocol_sha256}",
+        "version_binding": "protocol_sha256",
+        "new_session_on_version_change": True,
+        "partial_day_bootstrap": "observation_only",
+        "evaluation_eligibility": "complete_utc_day_after_anchor",
+        "protocol_hash_required": True,
+    }
+    assert payload["safety_boundary"]["paper_only"] is True
+    assert payload["safety_boundary"]["authenticated_orders_allowed"] is False
+    assert payload["metrics_observation_policy"]["trade_gate_enabled"] is False
+    assert payload["metrics_observation_policy"]["liquidity_threshold"] is None

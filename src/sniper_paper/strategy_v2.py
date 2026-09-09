@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from statistics import median
 
+from .levels import Level, LevelSide, canonical_level_catalog, level_active_at
 from .market import Bar
 from .paper import Side
 
@@ -22,11 +23,6 @@ class DecisionStatus(str, Enum):
     REJECTED = "REJECTED"
     MISSED = "MISSED"
     TRIGGERED = "TRIGGERED"
-
-
-class LevelSide(str, Enum):
-    HIGH = "HIGH"
-    LOW = "LOW"
 
 
 class LaneName(str, Enum):
@@ -39,20 +35,6 @@ class LaneName(str, Enum):
     CASCADE_IMPULSE = "cascade_impulse"
     FRESH_EXTREME_MOMENTUM = "fresh_extreme_momentum"
     DIAGONAL_CONTEXT = "diagonal_context"
-
-
-@dataclass(frozen=True)
-class Level:
-    level_id: str
-    symbol: str
-    timeframe: str
-    side: LevelSide
-    price: float
-    confirmed_at_ms: int
-    touches: int = 1
-    level_class: str = "swing"
-    origin_at_ms: int | None = None
-    broken_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -282,30 +264,67 @@ def _nearest_target(
     price: float,
     now_ms: int,
     timeframes: set[str],
+    canonical: bool = False,
+    active_as_of_ms: int | None = None,
 ) -> Level | None:
+    lifecycle_ms = now_ms if active_as_of_ms is None else min(now_ms, active_as_of_ms)
+    catalog = (
+        canonical_level_catalog(levels, symbol, lifecycle_ms)
+        if canonical
+        else [level for level in levels if level.symbol == symbol and level_active_at(level, lifecycle_ms)]
+    )
     if side is Side.LONG:
         relevant = [
             level
-            for level in levels
-            if level.symbol == symbol
-            and level.confirmed_at_ms <= now_ms
-            and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
-            and level.timeframe in timeframes
+            for level in catalog
+            if level.timeframe in timeframes
             and level.side is LevelSide.HIGH
             and level.price > price
         ]
-        return min(relevant, key=lambda level: level.price - price) if relevant else None
+        return min(relevant, key=lambda level: (level.price - price, level.confirmed_at_ms, level.level_id)) if relevant else None
     relevant = [
         level
-        for level in levels
-        if level.symbol == symbol
-        and level.confirmed_at_ms <= now_ms
-        and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
-        and level.timeframe in timeframes
+        for level in catalog
+        if level.timeframe in timeframes
         and level.side is LevelSide.LOW
         and level.price < price
     ]
-    return min(relevant, key=lambda level: price - level.price) if relevant else None
+    return min(relevant, key=lambda level: (price - level.price, level.confirmed_at_ms, level.level_id)) if relevant else None
+
+
+def _cascade_geometry(
+    levels: Iterable[Level],
+    *,
+    symbol: str,
+    side: Side,
+    price: float,
+    now_ms: int,
+) -> dict[str, float | str]:
+    """Describe the ordered canonical cascade without imposing a new gate."""
+
+    catalog = canonical_level_catalog(levels, symbol, now_ms)
+    members = [
+        level
+        for level in catalog
+        if level.timeframe in {"15m", "4h"}
+        and (
+            (side is Side.LONG and level.side is LevelSide.HIGH and level.price > price)
+            or (side is Side.SHORT and level.side is LevelSide.LOW and level.price < price)
+        )
+    ]
+    members.sort(key=lambda level: level.price, reverse=side is Side.SHORT)
+    if not members:
+        return {"cascade_count": 0.0, "cascade_level_ids": "", "cascade_adjacent_gap_bps": ""}
+    gaps_bp = [abs(current.price / previous.price - 1.0) * 10_000 for previous, current in zip(members, members[1:])]
+    span_bp = abs(members[-1].price / members[0].price - 1.0) * 10_000
+    return {
+        "cascade_count": float(len(members)),
+        "cascade_level_ids": ",".join(level.level_id for level in members),
+        "cascade_first_level_id": members[0].level_id,
+        "cascade_last_level_id": members[-1].level_id,
+        "cascade_adjacent_gap_bps": ",".join(f"{gap:.8g}" for gap in gaps_bp),
+        "cascade_total_span_bp": span_bp,
+    }
 
 
 def _mirror_side(side: Side) -> Side:
@@ -396,7 +415,6 @@ class StrategyV2Evaluator:
             for level in levels
             if level.symbol == symbol
             and level.confirmed_at_ms <= now_ms
-            and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
         ]
         if orderflow.symbol != symbol or orderflow.received_at_ms > now_ms:
             return [
@@ -486,7 +504,9 @@ class StrategyV2Evaluator:
             levels_for_side = [
                 level
                 for level in levels
-                if level.side is LevelSide.LOW and level.price <= latest.close and level.confirmed_at_ms <= latest.closed_at_ms
+                if level.side is LevelSide.LOW
+                and level.price <= latest.close
+                and level_active_at(level, latest.opened_at_ms)
             ]
             if not levels_for_side:
                 return None
@@ -509,7 +529,7 @@ class StrategyV2Evaluator:
             if not (self.min_risk_bp <= risk_bp <= self.max_risk_bp):
                 return None
             reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
-            opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"})
+            opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
             if opposite is not None and _level_distance_bp(entry, opposite.price) < reward_bp:
                 return None
             target_price = entry * (1.0 + reward_bp / 10_000)
@@ -520,6 +540,7 @@ class StrategyV2Evaluator:
                 "delta_ratio": frame.delta_ratio,
                 "range_bp": frame.range_bp,
                 "median_range_bp_20": frame.median_range_bp_20,
+                "median_abs_delta_20": frame.median_abs_delta_20,
                 "book_imbalance": frame.book_imbalance,
                 "atr_1m": atr,
                 "reward_bp": reward_bp,
@@ -546,7 +567,9 @@ class StrategyV2Evaluator:
         levels_for_side = [
             level
             for level in levels
-            if level.side is LevelSide.HIGH and level.price >= latest.close and level.confirmed_at_ms <= latest.closed_at_ms
+            if level.side is LevelSide.HIGH
+            and level.price >= latest.close
+            and level_active_at(level, latest.opened_at_ms)
         ]
         if not levels_for_side:
             return None
@@ -569,7 +592,7 @@ class StrategyV2Evaluator:
         if not (self.min_risk_bp <= risk_bp <= self.max_risk_bp):
             return None
         reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
-        opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"})
+        opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
         if opposite is not None and _level_distance_bp(entry, opposite.price) < reward_bp:
             return None
         target_price = entry * (1.0 - reward_bp / 10_000)
@@ -580,6 +603,7 @@ class StrategyV2Evaluator:
             "delta_ratio": frame.delta_ratio,
             "range_bp": frame.range_bp,
             "median_range_bp_20": frame.median_range_bp_20,
+            "median_abs_delta_20": frame.median_abs_delta_20,
             "book_imbalance": frame.book_imbalance,
             "atr_1m": atr,
             "reward_bp": reward_bp,
@@ -621,10 +645,13 @@ class StrategyV2Evaluator:
         post_armed = [bar for bar in bars_15s if bar.closed_at_ms > pending.armed_at_ms]
         if not post_armed:
             return None
+        frozen_delta_baseline = float(pending.features.get("median_abs_delta_20", 0.0))
+        if frozen_delta_baseline <= 0:
+            return None
         if pending.side is Side.LONG:
             if min(bar.low for bar in post_armed) < pending.sweep_extreme_price:
                 return None
-            if frame.delta_notional < frame.median_abs_delta_20:
+            if frame.delta_notional < frozen_delta_baseline:
                 return None
             if frame.best_bid < pending.reference_price + self.tick_size:
                 return None
@@ -637,7 +664,7 @@ class StrategyV2Evaluator:
         else:
             if max(bar.high for bar in post_armed) > pending.sweep_extreme_price:
                 return None
-            if frame.delta_notional > -frame.median_abs_delta_20:
+            if frame.delta_notional > -frozen_delta_baseline:
                 return None
             if frame.best_ask > pending.reference_price - self.tick_size:
                 return None
@@ -652,6 +679,7 @@ class StrategyV2Evaluator:
         features.update(
             {
                 "confirmation_delta": frame.delta_notional,
+                "confirmation_frozen_delta_baseline": frozen_delta_baseline,
                 "microprice_mid_bp": frame.microprice_mid_bp,
                 "book_imbalance": frame.book_imbalance,
             }
@@ -705,7 +733,7 @@ class StrategyV2Evaluator:
         flow_ok = frame.delta_notional > 0 if side is Side.LONG else frame.delta_notional < 0
         break_ok = current.close > max(item.high for item in previous) if side is Side.LONG else current.close < min(item.low for item in previous)
         book_ok = frame.book_imbalance >= self.min_book_imbalance if side is Side.LONG else frame.book_imbalance <= -self.min_book_imbalance
-        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"})
+        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
         if target_level is None:
             return self._reject(
                 lane=lane,
@@ -717,6 +745,13 @@ class StrategyV2Evaluator:
                     "book_imbalance": frame.book_imbalance,
                 },
             )
+        parent_setup_id = _hash(
+            symbol,
+            "target_seeking_parent",
+            side.value,
+            target_level.level_id,
+            current.opened_at_ms,
+        )
         stop = min(item.low for item in cons) * (1 - self.stop_buffer_bp / 10_000) if side is Side.LONG else max(item.high for item in cons) * (1 + self.stop_buffer_bp / 10_000)
         entry = frame.best_bid if side is Side.LONG else frame.best_ask
         risk_bp = _level_distance_bp(entry, stop)
@@ -752,6 +787,7 @@ class StrategyV2Evaluator:
                     "reward_risk": reward_bp / risk_bp,
                     "risk_bp": risk_bp,
                     "reward_bp": reward_bp,
+                    "parent_setup_id": parent_setup_id,
                 },
             )
         candidate = _LaneCandidate(
@@ -776,6 +812,7 @@ class StrategyV2Evaluator:
                 "reward_risk": reward_bp / risk_bp,
                 "risk_bp": risk_bp,
                 "reward_bp": reward_bp,
+                "parent_setup_id": parent_setup_id,
             },
         )
         return self._resolve_candidate(candidate, frame)
@@ -822,7 +859,7 @@ class StrategyV2Evaluator:
                     "book_imbalance": frame.book_imbalance,
                 },
             )
-        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"})
+        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
         if target_level is None:
             return self._reject(
                 lane=lane,
@@ -834,6 +871,13 @@ class StrategyV2Evaluator:
                     "book_imbalance": frame.book_imbalance,
                 },
             )
+        parent_setup_id = _hash(
+            symbol,
+            "target_seeking_parent",
+            side.value,
+            target_level.level_id,
+            current.opened_at_ms,
+        )
         stop = min(item.low for item in cons) * (1 - self.stop_buffer_bp / 10_000) if side is Side.LONG else max(item.high for item in cons) * (1 + self.stop_buffer_bp / 10_000)
         entry = frame.best_bid if side is Side.LONG else frame.best_ask
         risk_bp = _level_distance_bp(entry, stop)
@@ -874,6 +918,8 @@ class StrategyV2Evaluator:
                 "reward_risk": reward_bp / risk_bp,
                 "risk_bp": risk_bp,
                 "reward_bp": reward_bp,
+                "parent_setup_id": parent_setup_id,
+                "exit_mode": "target_level_touch_control",
             },
         )
         return self._resolve_candidate(candidate, frame)
@@ -894,14 +940,39 @@ class StrategyV2Evaluator:
             return self._reject(lane=lane, reason="warmup", side=None, features={})
         current = one[-1]
         previous = one[-2]
+        if frame.received_at_ms > current.closed_at_ms + self.entry_ttl_ms:
+            return self._reject(
+                lane=lane,
+                reason="stale_trigger_bar",
+                side=None,
+                features={"trigger_bar_closed_at_ms": current.closed_at_ms},
+            )
         side: Side | None = None
         target_level: Level | None = None
         if frame.delta_notional > 0 and current.close > previous.close:
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=previous.close, now_ms=now_ms, timeframes={"15m"})
+            target_level = _nearest_target(
+                levels,
+                symbol=symbol,
+                side=Side.LONG,
+                price=previous.close,
+                now_ms=now_ms,
+                timeframes={"15m"},
+                canonical=True,
+                active_as_of_ms=current.opened_at_ms,
+            )
             if target_level is not None and previous.close < target_level.price <= current.close:
                 side = Side.LONG
         elif frame.delta_notional < 0 and current.close < previous.close:
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=previous.close, now_ms=now_ms, timeframes={"15m"})
+            target_level = _nearest_target(
+                levels,
+                symbol=symbol,
+                side=Side.SHORT,
+                price=previous.close,
+                now_ms=now_ms,
+                timeframes={"15m"},
+                canonical=True,
+                active_as_of_ms=current.opened_at_ms,
+            )
             if target_level is not None and previous.close > target_level.price >= current.close:
                 side = Side.SHORT
         if side is None or target_level is None:
@@ -962,6 +1033,9 @@ class StrategyV2Evaluator:
         side: Side | None = None
         target_level: Level | None = None
         if current.low <= previous.low and current.close >= previous.close and frame.book_imbalance >= self.min_book_imbalance and frame.microprice > frame.mid:
+            # Structural reaction is an entry/setup lane: retain its direct
+            # source-level reference while target-seeking lanes use the
+            # canonical target catalogue.
             target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"})
             if target_level is not None and current.close >= previous.low + self.structure_reclaim_bp * previous.low / 10_000:
                 side = Side.LONG
@@ -1052,10 +1126,10 @@ class StrategyV2Evaluator:
         delta_ratio = frame.delta_ratio
         if current.close > previous.high and frame.delta_notional > 0 and body_to_range >= self.cascade_min_body_to_range and delta_ratio >= self.cascade_min_delta_ratio:
             side = Side.LONG
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"}, canonical=True)
         elif current.close < previous.low and frame.delta_notional < 0 and body_to_range >= self.cascade_min_body_to_range and delta_ratio >= self.cascade_min_delta_ratio:
             side = Side.SHORT
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"}, canonical=True)
         if side is None or target_level is None:
             return self._reject(
                 lane=lane,
@@ -1063,6 +1137,13 @@ class StrategyV2Evaluator:
                 side=side,
                 features={"body_to_range": body_to_range, "delta_ratio": delta_ratio},
             )
+        cascade_geometry = _cascade_geometry(
+            levels,
+            symbol=symbol,
+            side=side,
+            price=current.close,
+            now_ms=now_ms,
+        )
         stop = current.low * (1 - self.stop_buffer_bp / 10_000) if side is Side.LONG else current.high * (1 + self.stop_buffer_bp / 10_000)
         entry = frame.best_bid if side is Side.LONG else frame.best_ask
         risk_bp = _level_distance_bp(entry, stop)
@@ -1089,6 +1170,7 @@ class StrategyV2Evaluator:
                 "body_to_range": body_to_range,
                 "delta_ratio": delta_ratio,
                 "reward_risk": reward_bp / max(risk_bp, 1e-9),
+                **cascade_geometry,
             },
         )
         return self._resolve_candidate(candidate, frame)
@@ -1116,10 +1198,10 @@ class StrategyV2Evaluator:
         target_level: Level | None = None
         if current.close > max(item.high for item in lookback) and frame.delta_notional > 0 and frame.book_imbalance >= self.min_book_imbalance:
             side = Side.LONG
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"4h"}, canonical=True)
         elif current.close < min(item.low for item in lookback) and frame.delta_notional < 0 and frame.book_imbalance <= -self.min_book_imbalance:
             side = Side.SHORT
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"4h"}, canonical=True)
         if side is None or target_level is None:
             return self._reject(
                 lane=lane,

@@ -5,33 +5,17 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from enum import Enum
 
+from .levels import (
+    Level,
+    LevelSide,
+    canonical_level_catalog,
+    canonical_level_view,
+    cluster_levels,
+    level_active_at,
+)
 from .market import Bar
 from .paper import PaperSignal, Side
-
-
-class LevelSide(str, Enum):
-    HIGH = "HIGH"
-    LOW = "LOW"
-
-
-@dataclass(frozen=True)
-class Level:
-    level_id: str
-    symbol: str
-    timeframe: str
-    side: LevelSide
-    price: float
-    confirmed_at_ms: int
-    touches: int = 1
-    level_class: str = "swing"
-    origin_at_ms: int | None = None
-    broken_at_ms: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.broken_at_ms is not None and self.broken_at_ms < self.confirmed_at_ms:
-            raise ValueError("broken_at_ms cannot precede confirmed_at_ms")
 
 
 @dataclass(frozen=True)
@@ -294,64 +278,21 @@ class StrategyEvaluator:
 def _nearest_target(
     symbol: str, side: Side, price: float, levels: Iterable[Level], now_ms: int, *, timeframe: str
 ) -> Level | None:
+    catalog = canonical_level_catalog(levels, symbol, now_ms)
     raw = [
         level
-        for level in levels
-        if level.symbol == symbol
-        and level.timeframe == timeframe
-        and _level_is_active(level, now_ms)
+        for level in catalog
+        if level.timeframe == timeframe
         and (
             (side is Side.LONG and level.side is LevelSide.HIGH and level.price > price)
             or (side is Side.SHORT and level.side is LevelSide.LOW and level.price < price)
         )
     ]
-    eligible = _cluster_targets(raw, side)
-    if timeframe == "4h":
-        eligible.extend(level for level in raw if level.level_class in {"swing", "previous_day"})
-    else:
-        eligible.extend(level for level in raw if level.level_class == "previous_day")
-    return min(eligible, key=lambda level: abs(level.price - price)) if eligible else None
+    return min(raw, key=lambda level: (abs(level.price - price), level.confirmed_at_ms, level.level_id)) if raw else None
 
 
 def _cluster_targets(levels: Sequence[Level], side: Side, tolerance_bp: float = 10.0) -> list[Level]:
-    ordered = sorted(levels, key=lambda level: level.price)
-    result: list[Level] = []
-    used: set[str] = set()
-    for level in ordered:
-        if level.level_id in used:
-            continue
-        group = [
-            candidate
-            for candidate in ordered
-            if candidate.level_id not in used and abs(candidate.price / level.price - 1.0) * 10_000 <= tolerance_bp
-        ]
-        if sum(candidate.touches for candidate in group) < 2:
-            continue
-        used.update(candidate.level_id for candidate in group)
-        ids = ":".join(sorted(candidate.level_id for candidate in group))
-        target_price = (
-            min(candidate.price for candidate in group)
-            if side is Side.LONG
-            else max(candidate.price for candidate in group)
-        )
-        result.append(
-            Level(
-                hashlib.sha256(f"cluster:{ids}".encode()).hexdigest()[:20],
-                level.symbol,
-                level.timeframe,
-                level.side,
-                target_price,
-                max(candidate.confirmed_at_ms for candidate in group),
-                sum(candidate.touches for candidate in group),
-                "cluster",
-                min(
-                    candidate.origin_at_ms if candidate.origin_at_ms is not None else candidate.confirmed_at_ms
-                    for candidate in group
-                    if candidate.price == target_price
-                ),
-            )
-        )
-    return result
+    return cluster_levels(levels, side, tolerance_bp=tolerance_bp)
 
 
 def current_display_levels(
@@ -361,23 +302,25 @@ def current_display_levels(
     now_ms: int,
     limit: int = 8,
 ) -> list[Level]:
-    """Return the same structural level families that can become strategy targets."""
-    raw = [level for level in levels if level.symbol == symbol and _level_is_active(level, now_ms)]
-    four_hour = [level for level in raw if level.timeframe == "4h"]
-    previous_day = [level for level in raw if level.timeframe == "15m" and level.level_class == "previous_day"]
-    fifteen_highs = [level for level in raw if level.timeframe == "15m" and level.side is LevelSide.HIGH]
-    fifteen_lows = [level for level in raw if level.timeframe == "15m" and level.side is LevelSide.LOW]
-    clustered = _cluster_targets(fifteen_highs, Side.LONG) + _cluster_targets(fifteen_lows, Side.SHORT)
-    unique = {level.level_id: level for level in four_hour + previous_day + clustered}
-    return sorted(unique.values(), key=lambda level: (abs(level.price - price), -level.confirmed_at_ms))[:limit]
+    """Return the same canonical target families consumed by evaluators."""
+    return canonical_level_view(levels, symbol, price, now_ms, limit)
 
 
 def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -> list[Level]:
     day_ms = 86_400_000
     today = now_ms // day_ms * day_ms
     previous_start = today - day_ms
-    rows = [bar for bar in bars_15m if previous_start <= bar.opened_at_ms < today and bar.closed_at_ms <= today]
-    if not rows:
+    rows = sorted(
+        [bar for bar in bars_15m if previous_start <= bar.opened_at_ms < today and bar.closed_at_ms <= today],
+        key=lambda bar: bar.opened_at_ms,
+    )
+    expected = day_ms // (15 * 60_000)
+    if (
+        len(rows) != expected
+        or rows[0].opened_at_ms != previous_start
+        or rows[-1].closed_at_ms != today
+        or any(current.opened_at_ms != previous.closed_at_ms for previous, current in zip(rows, rows[1:]))
+    ):
         return []
     high = max(bar.high for bar in rows)
     low = min(bar.low for bar in rows)
@@ -411,7 +354,7 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
 
 def _level_is_active(level: Level, now_ms: int) -> bool:
     """Keep a level active until a confirmed close-through invalidates it."""
-    return level.confirmed_at_ms <= now_ms and (level.broken_at_ms is None or level.broken_at_ms > now_ms)
+    return level_active_at(level, now_ms)
 
 
 def apply_level_breaks(

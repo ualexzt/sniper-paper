@@ -8,7 +8,7 @@ import json
 import math
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -16,25 +16,22 @@ from statistics import median
 from typing import Any
 
 from .bybit_public import BybitPublicClient
+from .levels import Level, LevelSide
+from .liquidity import LiquidityImpact, calculate_liquidity_impact
 from .market import Bar, BarBuilder, Book, Trade
+from .metrics import MetricResult, btc_correlation, dollar_volume, natr_5m_14, signed_price_change, volume_splash
 from .orderflow import DomTracker, Footprint
-from .paper import PaperExecutor, Quote
+from .paper import PaperExecutor, PaperSignal, Quote
 from .paper import Side as PaperSide
 from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator, ShadowStatus
 from .shadow_setups import RetestReclaimShadowEvaluator, ShadowSetupStatus
+from .signal_path import IncrementalSignalPath, PathStatus, SignalPathResult, SignalPathTracker, TradeTick
 from .storage import Journal
 from .strategy import (
     CausalLevelEngine,
-    Level,
     apply_level_breaks,
     current_display_levels,
     previous_utc_day_levels,
-)
-from .strategy_v2 import (
-    Level as V2Level,
-)
-from .strategy_v2 import (
-    LevelSide as V2LevelSide,
 )
 from .strategy_v2 import (
     OrderflowFrame,
@@ -49,6 +46,10 @@ from .web import start_dashboard
 
 TIMEFRAMES = {"15s": 15_000, "1m": 60_000, "5m": 300_000, "15m": 900_000, "4h": 14_400_000}
 BYBIT_INTERVALS = {"1m": "1", "5m": "5", "15m": "15", "4h": "240"}
+# The level engines need enough completed history to reconstruct causal pivots
+# after a restart.  Keep this independent from the chart's display window.
+HISTORY_LIMIT = 1_000
+BAR_RETENTION = 1_000
 _REPO_V2_PROTOCOL = Path(__file__).resolve().parents[2] / "paper_strategy_v2.json"
 _CWD_V2_PROTOCOL = Path.cwd() / "paper_strategy_v2.json"
 V2_PROTOCOL_PATH = _REPO_V2_PROTOCOL if _REPO_V2_PROTOCOL.exists() else _CWD_V2_PROTOCOL
@@ -62,6 +63,8 @@ class SymbolState:
     min_order_qty: float = 0.0
     book: Book = field(init=False)
     bars: dict[str, list[Bar]] = field(default_factory=lambda: {name: [] for name in TIMEFRAMES})
+    history_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
+    metric_snapshot: dict[str, Any] = field(default_factory=dict)
     builders: dict[str, BarBuilder] = field(init=False)
     level_engines: dict[str, CausalLevelEngine] = field(init=False)
     levels: list[Level] = field(default_factory=list)
@@ -87,6 +90,13 @@ class PaperApp:
         orphaned = self.journal.reconcile_orphaned_triggers()
         self.protocol_data = json.loads(V2_PROTOCOL_PATH.read_text(encoding="utf-8"))
         self.protocol_hash = hashlib.sha256(V2_PROTOCOL_PATH.read_bytes()).hexdigest()
+        self.version_info = {str(key): str(value) for key, value in self.protocol_data["versions"].items()}
+        self.level_version = self.version_info["level"]
+        self.session_id = "unbound"
+        signal_path_policy = self.protocol_data.get("signal_path_policy", {})
+        self.signal_path_horizon_ms = int(signal_path_policy.get("horizon_ms", 86_400_000))
+        self.signal_paths: dict[str, tuple[str, IncrementalSignalPath]] = {}
+        orphaned_paths = self._reconcile_orphaned_signal_paths()
         shadow_start_key = f"shadow_started_at_ms:{self.protocol_hash}"
         shadow_start = self.journal.get_meta(shadow_start_key)
         if shadow_start is None:
@@ -132,6 +142,13 @@ class PaperApp:
         self.evaluation_eligible = False
         if orphaned:
             self.journal.event(_now_ms(), "WARN", "RESTART_RECONCILE", f"marked {orphaned} pending triggers MISSED")
+        if orphaned_paths:
+            self.journal.event(
+                _now_ms(),
+                "WARN",
+                "SIGNAL_PATH_RESTART",
+                f"marked {orphaned_paths} signal paths UNKNOWN after restart",
+            )
 
     async def run_forever(self) -> None:
         self.journal.set_meta("stream_state", "disconnected")
@@ -148,6 +165,10 @@ class PaperApp:
     async def _run_daily_session(self) -> None:
         now = datetime.now(UTC)
         day = now.date().isoformat()
+        self.session_id = f"{day}:{self.protocol_hash}"
+        self.journal.set_meta("current_session_id", self.session_id)
+        self.journal.set_meta("current_protocol_hash", self.protocol_hash)
+        self.journal.set_meta("current_versions_json", json.dumps(self.version_info, sort_keys=True))
         session_deadline = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), UTC)
         existing = self.journal.universe_for_date(day)
         symbol_meta: dict[str, dict[str, Any]] = {}
@@ -157,8 +178,19 @@ class PaperApp:
                 metrics = json.loads(str(row.get("metrics_json", "{}")))
                 symbol_meta[str(row["symbol"])] = metrics
             run = self.journal.universe_run_for_date(day)
-            self.evaluation_eligible = bool(run and run["source"].get("evaluation_eligible", False))
+            same_protocol = bool(run and run.get("protocol_hash") == self.protocol_hash)
+            self.evaluation_eligible = bool(
+                same_protocol and run and run["source"].get("evaluation_eligible", False)
+            )
             self.journal.event(_now_ms(), "INFO", "UNIVERSE_RESTORE", f"restored {len(symbols)} daily symbols")
+            if run and not same_protocol:
+                self.journal.event(
+                    _now_ms(),
+                    "WARN",
+                    "PROTOCOL_CHANGED_MIDDAY",
+                    "restored frozen daily symbols in observation-only mode",
+                    {"prior_protocol_hash": run.get("protocol_hash"), "protocol_hash": self.protocol_hash},
+                )
         else:
             snapshot = await asyncio.to_thread(self.selector.build_snapshot, now)
             symbols = [item.symbol for item in snapshot.selected]
@@ -168,6 +200,9 @@ class PaperApp:
             seconds_after_midnight = (now - datetime.combine(now.date(), datetime.min.time(), UTC)).total_seconds()
             payload["selection_mode"] = "utc_anchor" if seconds_after_midnight <= 300 else "partial_day_bootstrap"
             payload["evaluation_eligible"] = seconds_after_midnight <= 300
+            payload["session_id"] = self.session_id
+            payload["versions"] = self.version_info
+            payload["protocol_hash"] = self.protocol_hash
             self.evaluation_eligible = bool(payload["evaluation_eligible"])
             members = [
                 {
@@ -232,6 +267,11 @@ class PaperApp:
             )
             for symbol in symbols
         }
+        for state in self.states.values():
+            state.levels = [
+                self._level_from_storage(row)
+                for row in self.journal.load_levels(symbol=state.symbol, version=self.level_version)
+            ]
         strategy_params = self.protocol_data["parameters"]["strategy"]
         shadow_params = self.protocol_data["parameters"]["shadow"]
         execution = self.protocol_data["execution_policy"]
@@ -289,17 +329,24 @@ class PaperApp:
             await asyncio.gather(rollover, heartbeat, return_exceptions=True)
 
     async def _bootstrap(self, state: SymbolState) -> None:
+        detected: list[Level] = []
         for name, interval in BYBIT_INTERVALS.items():
-            payload = await asyncio.to_thread(self.client.get_kline, symbol=state.symbol, interval=interval, limit=200)
+            payload = await asyncio.to_thread(
+                self.client.get_kline, symbol=state.symbol, interval=interval, limit=HISTORY_LIMIT
+            )
             rows = payload.get("result", {}).get("list", [])
             parsed = _parse_klines(state.symbol, name, rows, _now_ms())
             state.bars[name].extend(parsed)
+            state.bars[name] = state.bars[name][-BAR_RETENTION:]
+            state.history_diagnostics[name] = _history_diagnostics(name, state.bars[name], HISTORY_LIMIT)
             self.journal.record_bars(name, parsed, "rest_kline")
             if name in state.level_engines:
                 for bar in parsed:
-                    state.levels.extend(state.level_engines[name].add(bar))
-        state.levels.extend(previous_utc_day_levels(state.symbol, state.bars["15m"], _now_ms()))
-        self._refresh_level_lifecycle(state, _now_ms())
+                    detected.extend(state.level_engines[name].add(bar))
+        now_ms = _now_ms()
+        detected.extend(previous_utc_day_levels(state.symbol, state.bars["15m"], now_ms))
+        self._merge_detected_levels(state, detected, now_ms)
+        self._refresh_level_lifecycle(state, now_ms)
         self.journal.event(_now_ms(), "INFO", "BOOTSTRAP", f"loaded causal bars for {state.symbol}")
 
     async def handle_message(self, message: dict, received_at_ms: int) -> None:
@@ -316,6 +363,7 @@ class PaperApp:
                     symbol_state.density_walls.clear()
                     symbol_state.shadow_active = False
                 self.executor.cancel_pending("market_stream_disconnected", received_at_ms)
+                self._mark_signal_paths_unknown(received_at_ms, "market_stream_disconnected")
                 detail = {"error": str(message.get("error", "")), "open_position": bool(self.executor.position)}
                 self.journal.event(
                     received_at_ms, "WARN", "STREAM_DISCONNECTED", "public market stream disconnected", detail
@@ -361,6 +409,7 @@ class PaperApp:
             for row in message.get("data", []):
                 await self._trade(row, received_at_ms)
                 symbol = str(row.get("s", ""))
+                self._observe_signal_paths(symbol, received_at_ms, float(row.get("p", 0)))
                 execution = self.executor.on_trade(
                     symbol,
                     received_at_ms,
@@ -388,9 +437,14 @@ class PaperApp:
                     state.bars[name].append(completed)
                     completed_any = True
                     self.journal.record_bar(name, completed, "public_trade")
-                    state.bars[name] = state.bars[name][-500:]
+                    state.bars[name] = state.bars[name][-BAR_RETENTION:]
+                    state.history_diagnostics[name] = _history_diagnostics(name, state.bars[name], HISTORY_LIMIT)
                     if name in state.level_engines:
-                        state.levels.extend(state.level_engines[name].add(completed))
+                        self._merge_detected_levels(
+                            state,
+                            state.level_engines[name].add(completed),
+                            received_at_ms,
+                        )
             if completed_any:
                 self._refresh_level_lifecycle(state, received_at_ms)
         except (KeyError, TypeError, ValueError) as exc:
@@ -428,7 +482,8 @@ class PaperApp:
         if state.bars["15s"] and bar.opened_at_ms <= state.bars["15s"][-1].opened_at_ms:
             return
         state.bars["15s"].append(bar)
-        state.bars["15s"] = state.bars["15s"][-500:]
+        state.bars["15s"] = state.bars["15s"][-BAR_RETENTION:]
+        state.history_diagnostics["15s"] = _history_diagnostics("15s", state.bars["15s"], HISTORY_LIMIT)
         self.journal.record_bar("15s", bar, "public_trade_footprint")
         state.orderflow_ready = not bool(footprint.get("incomplete") or footprint.get("partial"))
         if not state.orderflow_ready:
@@ -515,21 +570,7 @@ class PaperApp:
                 state.last_blocker = blocker
             return
         state.last_blocker = None
-        levels = [
-            V2Level(
-                level.level_id,
-                level.symbol,
-                level.timeframe,
-                V2LevelSide(level.side.value),
-                level.price,
-                level.confirmed_at_ms,
-                level.touches,
-                level.level_class,
-                level.origin_at_ms,
-                level.broken_at_ms,
-            )
-            for level in state.levels
-        ]
+        levels = list(state.levels)
         decisions = self.strategies[state.symbol].evaluate(
             symbol=state.symbol,
             now_ms=now_ms,
@@ -578,7 +619,7 @@ class PaperApp:
                 if kind == "level_removed":
                     state.density_walls[key]["evidence_quality"] = "ambiguous"
 
-    def _evaluate_shadow(self, state: SymbolState, levels: list[V2Level], now_ms: int) -> None:
+    def _evaluate_shadow(self, state: SymbolState, levels: list[Level], now_ms: int) -> None:
         shadow_evaluation_eligible = self.shadow_started_at_ms <= (now_ms // 86_400_000) * 86_400_000 + 300_000
         if not state.shadow_active:
             # Pre-ready walls are observation-only and cannot seed a forward setup.
@@ -712,7 +753,8 @@ class PaperApp:
         return sum(values) / len(values)
 
     def _refresh_level_lifecycle(self, state: SymbolState, now_ms: int) -> None:
-        state.levels = apply_level_breaks(
+        before = {level.level_id: level for level in state.levels}
+        refreshed = apply_level_breaks(
             state.levels,
             state.bars,
             now_ms,
@@ -722,6 +764,86 @@ class PaperApp:
             fast_confirming_closes=self.level_break_fast_closes,
             source_confirming_closes=self.level_break_source_closes,
         )
+        durable: list[Level] = []
+        for level in refreshed:
+            prior = before.get(level.level_id)
+            if level.broken_at_ms is not None and (prior is None or prior.broken_at_ms != level.broken_at_ms):
+                if self.journal.level_row(level.level_id) is None:
+                    self.journal.upsert_level(self._level_storage_mapping(prior or level, level.confirmed_at_ms))
+                stored = self.journal.mark_level_broken(
+                    level.level_id,
+                    level.broken_at_ms,
+                    "confirmed_close_break",
+                    updated_at_ms=now_ms,
+                )
+                level = self._level_from_storage(stored)
+            durable.append(level)
+        state.levels = durable
+
+    def _merge_detected_levels(self, state: SymbolState, detected: list[Level], now_ms: int) -> None:
+        """Merge detector output with durable, absorbing lifecycle state."""
+        by_id = {level.level_id: level for level in state.levels}
+        for level in detected:
+            prior = by_id.get(level.level_id)
+            if prior is not None:
+                level = replace(
+                    level,
+                    revision=max(level.revision, prior.revision),
+                    first_seen_at_ms=prior.first_seen_at_ms,
+                )
+            stored = self.journal.upsert_level(self._level_storage_mapping(level, now_ms))
+            by_id[level.level_id] = self._level_from_storage(stored)
+        state.levels = sorted(
+            by_id.values(),
+            key=lambda item: (item.timeframe, item.confirmed_at_ms, item.level_id),
+        )
+
+    def _level_storage_mapping(self, level: Level, now_ms: int) -> dict[str, Any]:
+        return {
+            **asdict(level),
+            "side": level.side.value,
+            "revision": level.revision,
+            "version": self.level_version,
+            "zone_low": level.price if level.zone_low is None else level.zone_low,
+            "zone_high": level.price if level.zone_high is None else level.zone_high,
+            "first_seen_at_ms": (
+                now_ms if level.first_seen_at_ms is None else level.first_seen_at_ms
+            ),
+            "updated_at_ms": max(
+                level.confirmed_at_ms,
+                now_ms if level.first_seen_at_ms is None else level.first_seen_at_ms,
+                level.broken_at_ms or 0,
+            ),
+            "provenance": {
+                "level_class": level.level_class,
+                "detector": "causal_pivot",
+                **level.provenance,
+            },
+        }
+
+    @staticmethod
+    def _level_from_storage(row: dict[str, Any]) -> Level:
+        return Level(
+            level_id=str(row["level_id"]),
+            symbol=str(row["symbol"]),
+            timeframe=str(row["timeframe"]),
+            side=LevelSide(str(row["side"])),
+            price=float(row["price"]),
+            confirmed_at_ms=int(row["confirmed_at_ms"]),
+            touches=int(row["touches"]),
+            level_class=str(row["level_class"]),
+            origin_at_ms=int(row["origin_at_ms"]),
+            broken_at_ms=None if row["broken_at_ms"] is None else int(row["broken_at_ms"]),
+            zone_low=float(row["zone_low"]),
+            zone_high=float(row["zone_high"]),
+            revision=int(row["revision"]),
+            level_version=str(row["version"]),
+            first_seen_at_ms=int(row["first_seen_at_ms"]),
+            invalidation_reason=(
+                None if row["invalidation_reason"] is None else str(row["invalidation_reason"])
+            ),
+            provenance=dict(row.get("provenance", {})),
+        )
 
     def _record_decision(self, state: SymbolState, decision: StrategyDecisionV2, price: float, now_ms: int) -> None:
         target = decision.target_level
@@ -729,6 +851,10 @@ class PaperApp:
         signal_id = signal.signal_id if signal else uuid.uuid4().hex
         side = signal.side.value if signal else (decision.side.value if decision.side else "LONG")
         features = dict(decision.features)
+        features["session_id"] = self.session_id
+        features["versions"] = self.version_info
+        features["data_coverage"] = self._metric_snapshot(state, now_ms)
+        features["liquidity_observation"] = self._liquidity_snapshot(state, now_ms)
         if target:
             features["level_id"] = target.level_id
         if decision.setup_id:
@@ -751,6 +877,7 @@ class PaperApp:
         }
         self.journal.record_signal(row)
         if signal:
+            self._start_signal_path(state, signal, price, now_ms)
             blocker = self.executor.submission_blocker(signal)
             if blocker:
                 self.journal.update_signal_status(signal.signal_id, "MISSED", blocker)
@@ -763,6 +890,141 @@ class PaperApp:
                 )
                 if not submitted:
                     self.journal.update_signal_status(signal.signal_id, "MISSED", "post_only_submission_rejected")
+
+    def _start_signal_path(
+        self,
+        state: SymbolState,
+        signal: PaperSignal,
+        entry_reference: float,
+        now_ms: int,
+    ) -> None:
+        tracker = SignalPathTracker(
+            signal.signal_id,
+            side="buy" if signal.side is PaperSide.LONG else "sell",
+            entry_price=entry_reference,
+            target_price=signal.target_price,
+            stop_price=signal.stop_price,
+            start_at_ms=now_ms,
+        )
+        self.signal_paths[signal.signal_id] = (state.symbol, IncrementalSignalPath(tracker))
+        self.journal.record_signal_path_event(
+            {
+                "event_id": f"{signal.signal_id}:START",
+                "signal_id": signal.signal_id,
+                "occurred_at_ms": now_ms,
+                "event_type": "START",
+                "reference_price": entry_reference,
+                "tp_touched": "UNKNOWN",
+                "sl_touched": "UNKNOWN",
+                "coverage": 1.0,
+                "status": "ACTIVE",
+                "reason": "admitted_signal_path",
+                "features": {
+                    "entry_reference": entry_reference,
+                    "target_price": signal.target_price,
+                    "stop_price": signal.stop_price,
+                    "horizon_ms": self.signal_path_horizon_ms,
+                },
+                "provenance": {
+                    "session_id": self.session_id,
+                    "protocol_hash": self.protocol_hash,
+                    "versions": self.version_info,
+                    "lane": signal.lane,
+                    "symbol": state.symbol,
+                    "data_source": "public_trade_ticks",
+                    "not_a_fill": True,
+                },
+            }
+        )
+
+    def _observe_signal_paths(self, symbol: str, occurred_at_ms: int, price: float) -> None:
+        completed: list[str] = []
+        for signal_id, (path_symbol, live) in self.signal_paths.items():
+            if path_symbol != symbol:
+                continue
+            deadline = live.tracker.start_at_ms + self.signal_path_horizon_ms
+            result = (
+                live.timeout(deadline)
+                if occurred_at_ms >= deadline
+                else live.observe_trade(TradeTick(occurred_at_ms, price))
+            )
+            if result.status in {
+                PathStatus.TP_TOUCHED,
+                PathStatus.SL_TOUCHED,
+                PathStatus.TIMEOUT,
+                PathStatus.AMBIGUOUS,
+                PathStatus.UNKNOWN,
+            }:
+                self._record_signal_path_result(result)
+                completed.append(signal_id)
+        for signal_id in completed:
+            self.signal_paths.pop(signal_id, None)
+
+    def _mark_signal_paths_unknown(self, occurred_at_ms: int, reason: str) -> None:
+        for signal_id, (_, live) in list(self.signal_paths.items()):
+            self._record_signal_path_result(live.mark_unknown(occurred_at_ms, reason))
+            self.signal_paths.pop(signal_id, None)
+
+    def _record_signal_path_result(self, result: SignalPathResult) -> None:
+        self.journal.record_signal_path_event(
+            {
+                "event_id": f"{result.signal_id}:{result.status.value}",
+                "signal_id": result.signal_id,
+                "occurred_at_ms": result.first_touch_at_ms or result.covered_until_ms or result.start_at_ms,
+                "event_type": result.status.value,
+                "price": result.first_touch_price,
+                "reference_price": result.entry_price,
+                "tp_touched": "YES" if result.status is PathStatus.TP_TOUCHED else (
+                    "NO" if result.status is PathStatus.SL_TOUCHED else result.status.value
+                    if result.status in {PathStatus.AMBIGUOUS, PathStatus.UNKNOWN}
+                    else "NO"
+                ),
+                "sl_touched": "YES" if result.status is PathStatus.SL_TOUCHED else (
+                    "NO" if result.status is PathStatus.TP_TOUCHED else result.status.value
+                    if result.status in {PathStatus.AMBIGUOUS, PathStatus.UNKNOWN}
+                    else "NO"
+                ),
+                "mfe_bp": result.mfe_bps,
+                "mae_bp": result.mae_bps,
+                "coverage": 1.0 if result.coverage_complete else 0.0,
+                "status": result.status.value,
+                "reason": result.coverage_reason,
+                "features": result.to_dict(),
+                "provenance": {"not_a_fill": True, "source": "signal_path_tracker_v1"},
+            }
+        )
+
+    def _reconcile_orphaned_signal_paths(self) -> int:
+        with self.journal.connect() as db:
+            active = db.execute(
+                """SELECT current.signal_id
+                   FROM signal_path_events AS current
+                   WHERE current.status='ACTIVE'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM signal_path_events AS later
+                       WHERE later.signal_id=current.signal_id
+                         AND (later.occurred_at_ms>current.occurred_at_ms OR (
+                           later.occurred_at_ms=current.occurred_at_ms AND later.event_id>current.event_id
+                         ))
+                     )"""
+            ).fetchall()
+        now_ms = _now_ms()
+        for event in active:
+            self.journal.record_signal_path_event(
+                {
+                    "event_id": f"{event['signal_id']}:RESTART_UNKNOWN:{now_ms}",
+                    "signal_id": event["signal_id"],
+                    "occurred_at_ms": now_ms,
+                    "event_type": "UNKNOWN",
+                    "tp_touched": "UNKNOWN",
+                    "sl_touched": "UNKNOWN",
+                    "coverage": 0.0,
+                    "status": "UNKNOWN",
+                    "reason": "restart_without_tick_buffer",
+                    "provenance": {"not_a_fill": True},
+                }
+            )
+        return len(active)
 
     def _mark_closed_signal(self, position_id: str, reason: str) -> None:
         with self.journal.connect() as db:
@@ -799,6 +1061,7 @@ class PaperApp:
         if forming is not None and forming.closed_at_ms <= now_ms:
             forming = None
         completed = state.bars[timeframe]
+        state.history_diagnostics[timeframe] = _history_diagnostics(timeframe, completed, HISTORY_LIMIT)
         if forming is not None and completed and forming.opened_at_ms <= completed[-1].opened_at_ms:
             forming = None
         bars = completed[-(179 if forming is not None else 180) :]
@@ -859,22 +1122,189 @@ class PaperApp:
         shadow_diagnostics = self.journal.shadow_diagnostics(symbol, limit=50, protocol_hash=self.protocol_hash)
         for item in shadow_diagnostics:
             item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
+        signal_paths = self.journal.signal_path_events_for_symbol(symbol, limit=50)
+        for item in signal_paths:
+            item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
+        metrics = self._metric_snapshot(state, now_ms)
+        liquidity = self._liquidity_snapshot(state, now_ms)
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "bars": bar_payload,
+            "history_diagnostics": state.history_diagnostics,
+            "metrics": metrics,
+            "liquidity": liquidity,
             "server_time_ms": now_ms,
             "bar_closes_at_ms": (now_ms // TIMEFRAMES[timeframe] + 1) * TIMEFRAMES[timeframe],
             "levels": [asdict(level) for level in levels],
+            "level_history": [
+                asdict(level)
+                for level in sorted(
+                    (item for item in state.levels if item.broken_at_ms is not None),
+                    key=lambda item: (item.broken_at_ms or 0, item.level_id),
+                    reverse=True,
+                )[:20]
+            ],
             "quote": quote,
             "last_price": last_price,
             "positions": positions,
             "open_orders": open_orders,
             "history": history,
             "shadow_diagnostics": shadow_diagnostics,
+            "signal_paths": signal_paths,
             "readiness": self._readiness(state, now_ms),
             "orderflow": state.last_orderflow,
+            "versions": self.version_info,
+            "session_id": self.session_id,
         }
+
+    def _metric_snapshot(self, state: SymbolState, now_ms: int) -> dict[str, Any]:
+        """Return observational Digash metrics without changing trade eligibility."""
+
+        five = state.bars["5m"]
+        metrics: dict[str, Any] = {
+            "mode": "shadow_observation_only",
+            "natr_5m_14_pct": _metric_payload(natr_5m_14(five, now_ms=now_ms)),
+            "price_change_24h_pct": _metric_payload(signed_price_change(five, 24 * 60, now_ms=now_ms)),
+            "volume_splash_2h": _metric_payload(volume_splash(five, comparison_window=24, now_ms=now_ms)),
+            "dollar_volume_24h_pq": _windowed_dollar_volume(five, 288, now_ms),
+        }
+        btc = self.states.get("BTCUSDT")
+        if btc is None:
+            metrics["btc_correlation_6h"] = _unavailable_metric("btc_context_not_in_daily_universe", 72)
+        else:
+            coin_window = five[-73:]
+            btc_window = btc.bars["5m"][-73:]
+            metrics["btc_correlation_6h"] = _metric_payload(
+                btc_correlation(coin_window, btc_window, min_samples=72, now_ms=now_ms)
+            )
+        required = (
+            "natr_5m_14_pct",
+            "price_change_24h_pct",
+            "volume_splash_2h",
+            "dollar_volume_24h_pq",
+        )
+        unavailable = [name for name in required if not metrics[name]["available"]]
+        metrics["readiness"] = {
+            "ready": not unavailable,
+            "required": list(required),
+            "unavailable": unavailable,
+        }
+        state.metric_snapshot = metrics
+        return metrics
+
+    def _liquidity_snapshot(self, state: SymbolState, now_ms: int) -> dict[str, Any]:
+        """Observe executable depth without introducing an unverified gate."""
+
+        if not state.book.ready or state.book.received_at_ms is None:
+            return {"mode": "shadow_observation_only", "status": "unavailable", "reason": "book_not_ready"}
+        book_age_ms = now_ms - state.book.received_at_ms
+        if book_age_ms < 0 or book_age_ms > self.max_book_age_ms:
+            return {
+                "mode": "shadow_observation_only",
+                "status": "unavailable",
+                "reason": "stale_book",
+                "book_age_ms": book_age_ms,
+            }
+        bids = list(state.book.bids.items())
+        asks = list(state.book.asks.items())
+        requested: dict[str, float] = {"author_reference_50000_usd": 50_000.0}
+        pending = self.executor.pending
+        if pending is not None and pending.signal.symbol == state.symbol and pending.quantity > 0:
+            requested["current_paper_order_usd"] = pending.quantity * pending.entry_price
+        observations = {
+            label: {
+                "quote_notional": notional,
+                "buy": _liquidity_payload(
+                    calculate_liquidity_impact(bids, asks, notional, side="buy", reference="mid")
+                ),
+                "sell": _liquidity_payload(
+                    calculate_liquidity_impact(bids, asks, notional, side="sell", reference="mid")
+                ),
+            }
+            for label, notional in requested.items()
+        }
+        return {
+            "mode": "shadow_observation_only",
+            "status": "observed",
+            "book_age_ms": book_age_ms,
+            "book_depth_contract": "orderbook.50",
+            "observations": observations,
+        }
+
+
+def _history_diagnostics(timeframe: str, bars: list[Bar], requested_bars: int = HISTORY_LIMIT) -> dict[str, Any]:
+    """Describe observed history without fabricating gaps before first listing data."""
+
+    interval = TIMEFRAMES[timeframe]
+    ordered = sorted({bar.opened_at_ms: bar for bar in bars}.values(), key=lambda bar: bar.opened_at_ms)
+    gaps: list[dict[str, int]] = []
+    for previous, current in pairwise(ordered):
+        missing = (current.opened_at_ms - previous.opened_at_ms) // interval - 1
+        if missing > 0:
+            gaps.append(
+                {
+                    "from_opened_at_ms": previous.opened_at_ms,
+                    "to_opened_at_ms": current.opened_at_ms,
+                    "missing_bars": missing,
+                }
+            )
+    received = len(ordered)
+    interior_missing = sum(item["missing_bars"] for item in gaps)
+    short_history = received < requested_bars
+    if gaps:
+        status = "gapped"
+    elif short_history:
+        status = "incomplete_history"
+    else:
+        status = "complete"
+    return {
+        "timeframe": timeframe,
+        "interval_ms": interval,
+        "requested_bars": requested_bars,
+        "received_bars": received,
+        "first_opened_at_ms": ordered[0].opened_at_ms if ordered else None,
+        "last_opened_at_ms": ordered[-1].opened_at_ms if ordered else None,
+        "interior_gap_count": len(gaps),
+        "interior_missing_bars": interior_missing,
+        "gaps": gaps,
+        "history_complete": status == "complete",
+        "coverage_status": status,
+        # A short contiguous response is not a data gap; it can be a young
+        # listing (or an exchange-side history limit), so leave that explicit.
+        "short_contiguous_history": short_history and not gaps,
+    }
+
+
+def _metric_payload(result: MetricResult) -> dict[str, Any]:
+    return asdict(result) | {"available": result.available}
+
+
+def _unavailable_metric(reason: str, expected_samples: int) -> dict[str, Any]:
+    return _metric_payload(MetricResult(None, 0, expected_samples, 0.0, reason))
+
+
+def _windowed_dollar_volume(bars: list[Bar], expected_bars: int, now_ms: int) -> dict[str, Any]:
+    completed = [bar for bar in bars if bar.closed_at_ms <= now_ms]
+    if len(completed) < expected_bars:
+        return _metric_payload(
+            MetricResult(
+                None,
+                len(completed),
+                expected_bars,
+                len(completed) / expected_bars,
+                "insufficient_completed_bars",
+            )
+        )
+    window = completed[-expected_bars:]
+    interval = window[0].timeframe_ms
+    if any(current.opened_at_ms - previous.opened_at_ms != interval for previous, current in pairwise(window)):
+        return _unavailable_metric("missing_bar_in_window", expected_bars)
+    return _metric_payload(dollar_volume(window, now_ms=now_ms))
+
+
+def _liquidity_payload(result: LiquidityImpact) -> dict[str, Any]:
+    return asdict(result)
 
 
 def _parse_klines(symbol: str, timeframe: str, rows: list, now_ms: int) -> list[Bar]:
