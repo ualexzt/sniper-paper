@@ -64,10 +64,10 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
     payload = json.loads(v2_path.read_text(encoding="utf-8"))
 
-    assert payload["version"] == "v2.4.0"
+    assert payload["version"] == "v2.5.0"
     assert payload["versions"] == {
-        "strategy": "v2.3.0",
-        "level": "canonical_level_catalog_v1",
+        "strategy": "v2.4.0-digash-levels",
+        "level": "digash_horizontal_levels_v1",
         "universe": "daily_universe_v2_shadow_metrics",
         "execution": "paper_execution_v1",
         "source_data_contract": "bybit_public_market_data_v1",
@@ -79,6 +79,20 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
         "partial_day_bootstrap": "observation_only",
         "evaluation_eligibility": "complete_utc_day_after_anchor",
         "protocol_hash_required": True,
+    }
+    assert payload["horizontal_level_policy"] == {
+        "runtime_source": "digash_horizontal_levels_v1",
+        "completed_bars_only": True,
+        "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
+        "history_bars": 1000,
+        "extremum_search_period": 40,
+        "right_exclusion_bars": 20,
+        "merge_tolerance_endpoints_bp": {"1m": 20.0, "1d": 125.0},
+        "pivot_rule": "digash_unique_centered_40_hypothesis_v1",
+        "intermediate_tolerance_rule": "digash_tolerance_log_time_hypothesis_v1",
+        "break_rule": "completed_close",
+        "reactivation_allowed": False,
+        "legacy_15m_4h_runtime_allowed": False,
     }
     assert payload["safety_boundary"]["paper_only"] is True
     assert payload["safety_boundary"]["authenticated_orders_allowed"] is False

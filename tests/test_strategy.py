@@ -1,4 +1,4 @@
-from sniper_paper.levels import canonical_level_catalog, level_active_at
+from sniper_paper.levels import DIGASH_LEVEL_VERSION, canonical_level_catalog, level_active_at
 from sniper_paper.market import Bar
 from sniper_paper.paper import Side
 from sniper_paper.strategy import (
@@ -112,6 +112,40 @@ def test_level_model_and_catalog_are_shared_by_both_strategy_lanes() -> None:
     }
     assert any(level.level_class == "cluster" for level in catalog)
     assert all(level.level_id != "single" for level in catalog)
+
+
+def test_digash_catalog_uses_all_supported_timeframes_and_excludes_legacy_controls() -> None:
+    digash = [
+        Level(
+            f"digash-{timeframe}",
+            "XUSDT",
+            timeframe,
+            LevelSide.HIGH,
+            101 + index,
+            1,
+            level_class="digash_extreme",
+            level_version=DIGASH_LEVEL_VERSION,
+        )
+        for index, timeframe in enumerate(("1m", "5m", "15m", "30m", "1h", "4h", "1d"))
+    ]
+    legacy = Level("legacy", "XUSDT", "4h", LevelSide.HIGH, 120, 1)
+    broken = Level(
+        "broken-digash",
+        "XUSDT",
+        "1h",
+        LevelSide.HIGH,
+        110,
+        1,
+        level_class="digash_extreme",
+        level_version=DIGASH_LEVEL_VERSION,
+        broken_at_ms=5,
+    )
+
+    catalog = canonical_level_catalog([legacy, broken, *digash], "XUSDT", 10)
+
+    assert {level.timeframe for level in catalog} == {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+    assert all(level.level_version == DIGASH_LEVEL_VERSION for level in catalog)
+    assert canonical_level_catalog([legacy, broken], "XUSDT", 10) == []
 
 
 def test_level_active_at_supports_pre_event_reference_without_reactivation() -> None:

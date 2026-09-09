@@ -16,22 +16,21 @@ from statistics import median
 from typing import Any
 
 from .bybit_public import BybitPublicClient
-from .levels import Level, LevelSide
+from .levels import DIGASH_LEVEL_TIMEFRAMES, DIGASH_LEVEL_VERSION, Level, LevelSide
 from .liquidity import LiquidityImpact, calculate_liquidity_impact
 from .market import Bar, BarBuilder, Book, Trade
 from .metrics import MetricResult, btc_correlation, dollar_volume, natr_5m_14, signed_price_change, volume_splash
 from .orderflow import DomTracker, Footprint
 from .paper import PaperExecutor, PaperSignal, Quote
 from .paper import Side as PaperSide
+from .shadow_levels import GeometryConfig, build_reference_levels
 from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator, ShadowStatus
 from .shadow_setups import RetestReclaimShadowEvaluator, ShadowSetupStatus
 from .signal_path import IncrementalSignalPath, PathStatus, SignalPathResult, SignalPathTracker, TradeTick
 from .storage import Journal
 from .strategy import (
-    CausalLevelEngine,
     apply_level_breaks,
     current_display_levels,
-    previous_utc_day_levels,
 )
 from .strategy_v2 import (
     OrderflowFrame,
@@ -44,8 +43,12 @@ from .stream import run_public_stream
 from .universe import DailyUniverseSelector
 from .web import start_dashboard
 
-TIMEFRAMES = {"15s": 15_000, "1m": 60_000, "5m": 300_000, "15m": 900_000, "4h": 14_400_000}
-BYBIT_INTERVALS = {"1m": "1", "5m": "5", "15m": "15", "4h": "240"}
+TIMEFRAMES = {
+    "15s": 15_000, "1m": 60_000, "5m": 300_000, "15m": 900_000,
+    "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+}
+BYBIT_INTERVALS = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
+DIGASH_TIMEFRAMES = tuple(timeframe for timeframe in BYBIT_INTERVALS if timeframe in DIGASH_LEVEL_TIMEFRAMES)
 # The level engines need enough completed history to reconstruct causal pivots
 # after a restart.  Keep this independent from the chart's display window.
 HISTORY_LIMIT = 1_000
@@ -66,7 +69,6 @@ class SymbolState:
     history_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     metric_snapshot: dict[str, Any] = field(default_factory=dict)
     builders: dict[str, BarBuilder] = field(init=False)
-    level_engines: dict[str, CausalLevelEngine] = field(init=False)
     levels: list[Level] = field(default_factory=list)
     snapshot_received_at_ms: int | None = None
     last_orderflow: dict[str, Any] | None = None
@@ -80,7 +82,6 @@ class SymbolState:
     def __post_init__(self) -> None:
         self.book = Book(self.symbol)
         self.builders = {name: BarBuilder(self.symbol, milliseconds) for name, milliseconds in TIMEFRAMES.items()}
-        self.level_engines = {name: CausalLevelEngine(name) for name in ("15m", "4h")}
 
 
 class PaperApp:
@@ -92,6 +93,8 @@ class PaperApp:
         self.protocol_hash = hashlib.sha256(V2_PROTOCOL_PATH.read_bytes()).hexdigest()
         self.version_info = {str(key): str(value) for key, value in self.protocol_data["versions"].items()}
         self.level_version = self.version_info["level"]
+        if self.level_version != DIGASH_LEVEL_VERSION:
+            raise ValueError("protocol level version does not match the runtime Digash detector")
         self.session_id = "unbound"
         signal_path_policy = self.protocol_data.get("signal_path_policy", {})
         self.signal_path_horizon_ms = int(signal_path_policy.get("horizon_ms", 86_400_000))
@@ -270,7 +273,7 @@ class PaperApp:
         for state in self.states.values():
             state.levels = [
                 self._level_from_storage(row)
-                for row in self.journal.load_levels(symbol=state.symbol, version=self.level_version)
+                for row in self.journal.load_levels(symbol=state.symbol, version=DIGASH_LEVEL_VERSION)
             ]
         strategy_params = self.protocol_data["parameters"]["strategy"]
         shadow_params = self.protocol_data["parameters"]["shadow"]
@@ -329,7 +332,6 @@ class PaperApp:
             await asyncio.gather(rollover, heartbeat, return_exceptions=True)
 
     async def _bootstrap(self, state: SymbolState) -> None:
-        detected: list[Level] = []
         for name, interval in BYBIT_INTERVALS.items():
             payload = await asyncio.to_thread(
                 self.client.get_kline, symbol=state.symbol, interval=interval, limit=HISTORY_LIMIT
@@ -340,14 +342,41 @@ class PaperApp:
             state.bars[name] = state.bars[name][-BAR_RETENTION:]
             state.history_diagnostics[name] = _history_diagnostics(name, state.bars[name], HISTORY_LIMIT)
             self.journal.record_bars(name, parsed, "rest_kline")
-            if name in state.level_engines:
-                for bar in parsed:
-                    detected.extend(state.level_engines[name].add(bar))
         now_ms = _now_ms()
-        detected.extend(previous_utc_day_levels(state.symbol, state.bars["15m"], now_ms))
-        self._merge_detected_levels(state, detected, now_ms)
+        self._refresh_digash_levels(state, now_ms)
         self._refresh_level_lifecycle(state, now_ms)
         self.journal.event(_now_ms(), "INFO", "BOOTSTRAP", f"loaded causal bars for {state.symbol}")
+
+    def _refresh_digash_levels(self, state: SymbolState, now_ms: int) -> None:
+        """Rebuild the canonical level catalog from completed Bybit bars.
+
+        ``build_reference_levels`` is intentionally pure and causal, so a
+        restart and a live refresh produce the same IDs.  We merge its output
+        into the durable journal rather than replacing state: this preserves
+        absorbing break timestamps when a later 1000-bar window no longer
+        contains the historical pivot.
+        """
+        config = GeometryConfig(history_limit=HISTORY_LIMIT, level_version=DIGASH_LEVEL_VERSION)
+        detected: list[Level] = []
+        for timeframe in DIGASH_TIMEFRAMES:
+            result = build_reference_levels(
+                state.bars.get(timeframe, ()), timeframe=timeframe, now_ms=now_ms, config=config
+            )
+            detected.extend(result.levels)
+            state.history_diagnostics[timeframe] = {
+                **state.history_diagnostics.get(timeframe, {}),
+                "digash_coverage": asdict(result.coverage),
+            }
+        # Replace only detector-owned active catalog entries; legacy 15m/4h
+        # records remain available in storage as control diagnostics but can
+        # no longer become canonical runtime levels.
+        retained = [
+            level
+            for level in state.levels
+            if level.level_version == DIGASH_LEVEL_VERSION and level.broken_at_ms is not None
+        ]
+        state.levels = retained
+        self._merge_detected_levels(state, detected, now_ms)
 
     async def handle_message(self, message: dict, received_at_ms: int) -> None:
         if message.get("op") == "connection":
@@ -430,7 +459,7 @@ class PaperApp:
         try:
             trade = Trade(symbol, received_at_ms, str(row["i"]), float(row["p"]), float(row["v"]), str(row["S"]))
             completed_any = False
-            for name in ("4h", "15m", "5m", "1m"):
+            for name in ("1d", "4h", "1h", "30m", "15m", "5m", "1m"):
                 for completed in state.builders[name].add(trade):
                     if state.bars[name] and completed.opened_at_ms <= state.bars[name][-1].opened_at_ms:
                         continue
@@ -439,13 +468,10 @@ class PaperApp:
                     self.journal.record_bar(name, completed, "public_trade")
                     state.bars[name] = state.bars[name][-BAR_RETENTION:]
                     state.history_diagnostics[name] = _history_diagnostics(name, state.bars[name], HISTORY_LIMIT)
-                    if name in state.level_engines:
-                        self._merge_detected_levels(
-                            state,
-                            state.level_engines[name].add(completed),
-                            received_at_ms,
-                        )
             if completed_any:
+                # Recompute only from completed bars; forming bars never enter
+                # the geometry detector or strategy state.
+                self._refresh_digash_levels(state, received_at_ms)
                 self._refresh_level_lifecycle(state, received_at_ms)
         except (KeyError, TypeError, ValueError) as exc:
             self.journal.event(received_at_ms, "WARN", "TRADE", str(exc), {"symbol": symbol})
@@ -803,7 +829,7 @@ class PaperApp:
             **asdict(level),
             "side": level.side.value,
             "revision": level.revision,
-            "version": self.level_version,
+            "version": level.level_version or self.level_version,
             "zone_low": level.price if level.zone_low is None else level.zone_low,
             "zone_high": level.price if level.zone_high is None else level.zone_high,
             "first_seen_at_ms": (

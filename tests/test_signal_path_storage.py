@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from sniper_paper.storage import Journal, SCHEMA_VERSION
+from sniper_paper.storage import SCHEMA_VERSION, Journal
 
 
 def event(**overrides):

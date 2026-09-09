@@ -1,6 +1,6 @@
 # Digash change implementation status
 
-Date: 2026-09-09. Protocol: `paper_strategy_v2.json` v2.4.0.
+Date: 2026-09-09. Protocol: `paper_strategy_v2.json` v2.5.0.
 
 This is an implementation ledger, not evidence of profitability and not a
 claim that the undisclosed Digash level algorithm has been cloned exactly.
@@ -15,10 +15,19 @@ claim that the undisclosed Digash level algorithm has been cloned exactly.
 - Previous-day levels require all 96 contiguous completed 15m bars.
 - Bootstrap and in-memory retention use 1000 completed bars per timeframe and
   publish explicit short-history/gap diagnostics.
-- A separate Digash reference-geometry adaptation implements the documented
-  1000/40/20 contract with configurable merge/break rules. It remains shadow
-  because the exact pivot, wick/close and intermediate timeframe tolerances are
-  not public.
+- The runtime active-level detector covers all seven Digash timeframes:
+  `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`. It uses 1,000 completed bars
+  per timeframe, a 40-bar centred unique-extremum hypothesis, and excludes the
+  latest 20 bars from candidate search. The former 15m/4h-only engines are no
+  longer runtime sources.
+- Merge endpoints are the documented 0.20% at 1m and 1.25% at 1d. Values for
+  intermediate timeframes use a versioned log-time interpolation hypothesis;
+  they are not claimed to be official Digash values.
+- Runtime levels use a causal completed-close lifecycle: a confirmed level is
+  active until its first qualifying close break, then becomes absorbing
+  `broken` and cannot reactivate after recalculation or restart. This is our
+  explicit lifecycle contract, not a claim that the undisclosed Digash break
+  rule has been recovered exactly.
 - Causal, threshold-free NATR 5m/14, signed 24h return, dollar volume, volume
   splash, volatility and BTC-correlation math is implemented with coverage and
   missing-data reasons. Daily candidates record NATR and signed return without
@@ -37,8 +46,10 @@ claim that the undisclosed Digash level algorithm has been cloned exactly.
 
 ## Intentionally not promoted into trade gates yet
 
-- Exact Digash level geometry: 20 labelled cases and a frozen 10-case holdout
-  still need to be assembled from matching venue/symbol/timeframe screenshots.
+- Exact Digash geometry is not claimed: the precise pivot, wick/close break
+  semantics and intermediate tolerance table remain undisclosed. Twenty
+  labelled cases and a frozen 10-case holdout still need to be assembled from
+  matching venue/symbol/timeframe screenshots.
 - `trade_count_24h >= 1,000,000`: Bybit ticker does not provide this field. A
   wider deduplicated public-trade recorder must first be load-tested; counts
   from only the selected daily coins would be selection-biased.
@@ -58,5 +69,6 @@ claim that the undisclosed Digash level algorithm has been cloned exactly.
 - Docker image builds and initializes schema v5.
 - Additive migration from an older local SQLite copy preserves existing rows
   and passes `PRAGMA integrity_check`.
-- Production deployment must back up the remote database, migrate a copy,
-  then verify container health, schema/integrity, feed readiness and data growth.
+- Deployment status is intentionally not claimed here. Before any deployment,
+  back up the remote database, migrate a copy, then verify container health,
+  schema/integrity, feed readiness and data growth.

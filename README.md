@@ -22,8 +22,9 @@ For a plain-language Ukrainian explanation, see
   complete daily universe.
 - Public `orderbook.50` and `publicTrade` streams maintain executable quotes,
   causal 15-second footprint buckets, DOM evidence, receive-time bars, and
-  causal 15m/4h levels. An application-level WebSocket ping avoids the prior
-  recurring library keepalive disconnects.
+  Digash-runtime horizontal levels on 1m, 5m, 15m, 30m, 1h, 4h and 1d. An
+  application-level WebSocket ping avoids the prior recurring library
+  keepalive disconnects.
 - A level is removed from both future target selection and the chart after a
   causal close-through: two consecutive completed 1m closes or one completed
   source-timeframe close at least one tick beyond it. Wicks do not invalidate
@@ -42,9 +43,9 @@ For a plain-language Ukrainian explanation, see
 - A stream break invalidates every book and any pending entry becomes `MISSED`;
   trading waits for a new snapshot and warmup.
 - The read-only trading dashboard has a daily-universe sidebar, selectable
-  1m/5m/15m/4h candlestick chart with causal 15m clusters, previous-day levels,
-  4h swings and paper brackets, plus Paper trading, TP/SL paths, Open orders,
-  History and Shadow tabs. It also shows metric coverage, $50k/current-order
+  1m/5m/15m/30m/1h/4h/1d candlestick chart with runtime horizontal levels and
+  paper brackets, plus Paper trading, TP/SL paths, Open orders, History and
+  Shadow tabs. It also shows metric coverage, $50k/current-order
   book-impact observations, active/broken level metadata and immutable session
   versions. Its header reports server heartbeat, public WebSocket, book and
   metric readiness.

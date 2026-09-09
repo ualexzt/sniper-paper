@@ -12,9 +12,10 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import pairwise
 from statistics import median
 
-from .levels import Level, LevelSide, canonical_level_catalog, level_active_at
+from .levels import DIGASH_LEVEL_TIMEFRAMES, Level, LevelSide, canonical_level_catalog, level_active_at
 from .market import Bar
 from .paper import Side
 
@@ -315,7 +316,7 @@ def _cascade_geometry(
     members.sort(key=lambda level: level.price, reverse=side is Side.SHORT)
     if not members:
         return {"cascade_count": 0.0, "cascade_level_ids": "", "cascade_adjacent_gap_bps": ""}
-    gaps_bp = [abs(current.price / previous.price - 1.0) * 10_000 for previous, current in zip(members, members[1:])]
+    gaps_bp = [abs(current.price / previous.price - 1.0) * 10_000 for previous, current in pairwise(members)]
     span_bp = abs(members[-1].price / members[0].price - 1.0) * 10_000
     return {
         "cascade_count": float(len(members)),
@@ -529,7 +530,7 @@ class StrategyV2Evaluator:
             if not (self.min_risk_bp <= risk_bp <= self.max_risk_bp):
                 return None
             reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
-            opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
+            opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
             if opposite is not None and _level_distance_bp(entry, opposite.price) < reward_bp:
                 return None
             target_price = entry * (1.0 + reward_bp / 10_000)
@@ -592,7 +593,7 @@ class StrategyV2Evaluator:
         if not (self.min_risk_bp <= risk_bp <= self.max_risk_bp):
             return None
         reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
-        opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
+        opposite = _nearest_target(levels, symbol=symbol, side=side, price=entry, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         if opposite is not None and _level_distance_bp(entry, opposite.price) < reward_bp:
             return None
         target_price = entry * (1.0 - reward_bp / 10_000)
@@ -733,7 +734,7 @@ class StrategyV2Evaluator:
         flow_ok = frame.delta_notional > 0 if side is Side.LONG else frame.delta_notional < 0
         break_ok = current.close > max(item.high for item in previous) if side is Side.LONG else current.close < min(item.low for item in previous)
         book_ok = frame.book_imbalance >= self.min_book_imbalance if side is Side.LONG else frame.book_imbalance <= -self.min_book_imbalance
-        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
+        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         if target_level is None:
             return self._reject(
                 lane=lane,
@@ -859,7 +860,7 @@ class StrategyV2Evaluator:
                     "book_imbalance": frame.book_imbalance,
                 },
             )
-        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes={"4h", "15m"}, canonical=True)
+        target_level = _nearest_target(levels, symbol=symbol, side=side, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         if target_level is None:
             return self._reject(
                 lane=lane,
@@ -956,7 +957,7 @@ class StrategyV2Evaluator:
                 side=Side.LONG,
                 price=previous.close,
                 now_ms=now_ms,
-                timeframes={"15m"},
+                timeframes=DIGASH_LEVEL_TIMEFRAMES,
                 canonical=True,
                 active_as_of_ms=current.opened_at_ms,
             )
@@ -969,7 +970,7 @@ class StrategyV2Evaluator:
                 side=Side.SHORT,
                 price=previous.close,
                 now_ms=now_ms,
-                timeframes={"15m"},
+                timeframes=DIGASH_LEVEL_TIMEFRAMES,
                 canonical=True,
                 active_as_of_ms=current.opened_at_ms,
             )
@@ -1036,11 +1037,11 @@ class StrategyV2Evaluator:
             # Structural reaction is an entry/setup lane: retain its direct
             # source-level reference while target-seeking lanes use the
             # canonical target catalogue.
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES)
             if target_level is not None and current.close >= previous.low + self.structure_reclaim_bp * previous.low / 10_000:
                 side = Side.LONG
         elif current.high >= previous.high and current.close <= previous.close and frame.book_imbalance <= -self.min_book_imbalance and frame.microprice < frame.mid:
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"})
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES)
             if target_level is not None and current.close <= previous.high - self.structure_reclaim_bp * previous.high / 10_000:
                 side = Side.SHORT
         if side is None or target_level is None:
@@ -1126,10 +1127,10 @@ class StrategyV2Evaluator:
         delta_ratio = frame.delta_ratio
         if current.close > previous.high and frame.delta_notional > 0 and body_to_range >= self.cascade_min_body_to_range and delta_ratio >= self.cascade_min_delta_ratio:
             side = Side.LONG
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"}, canonical=True)
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         elif current.close < previous.low and frame.delta_notional < 0 and body_to_range >= self.cascade_min_body_to_range and delta_ratio >= self.cascade_min_delta_ratio:
             side = Side.SHORT
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"15m", "4h"}, canonical=True)
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         if side is None or target_level is None:
             return self._reject(
                 lane=lane,
@@ -1198,10 +1199,10 @@ class StrategyV2Evaluator:
         target_level: Level | None = None
         if current.close > max(item.high for item in lookback) and frame.delta_notional > 0 and frame.book_imbalance >= self.min_book_imbalance:
             side = Side.LONG
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes={"4h"}, canonical=True)
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.LONG, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         elif current.close < min(item.low for item in lookback) and frame.delta_notional < 0 and frame.book_imbalance <= -self.min_book_imbalance:
             side = Side.SHORT
-            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes={"4h"}, canonical=True)
+            target_level = _nearest_target(levels, symbol=symbol, side=Side.SHORT, price=current.close, now_ms=now_ms, timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True)
         if side is None or target_level is None:
             return self._reject(
                 lane=lane,

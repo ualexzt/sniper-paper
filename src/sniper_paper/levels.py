@@ -1,9 +1,8 @@
 """Canonical causal horizontal-level model and target catalogue.
 
-Both the chart and evaluators receive levels through this module.  Raw swing
-levels remain useful as provenance for setup detection, but only canonical
-families (higher-timeframe swings, clustered 15m swings, and previous-day
-levels) are exposed by :func:`canonical_level_catalog` for target selection.
+Both the chart and evaluators receive levels through this module. Digash v1
+levels from every supported 1m--1d timeframe are the runtime catalogue. The
+older 15m/4h families remain supported only for deterministic legacy replays.
 """
 
 from __future__ import annotations
@@ -14,6 +13,9 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+DIGASH_LEVEL_VERSION = "digash_horizontal_levels_v1"
+DIGASH_LEVEL_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h", "1d"})
 
 
 class LevelSide(str, Enum):
@@ -193,14 +195,27 @@ def canonical_level_catalog(
 ) -> list[Level]:
     """Return the single deterministic set of currently eligible target levels.
 
-    The catalog intentionally excludes inactive/future levels and unclustered
-    15m swings.  It contains all 4h levels, previous-day high/low levels, and
-    qualifying 15m clusters.  Ordering is stable across callers and process
-    restarts; the view function below is responsible only for proximity/limit
-    presentation.
+    The catalog excludes inactive/future levels. When versioned Digash levels
+    are present, legacy controls are excluded and every supported 1m--1d
+    timeframe is eligible. Legacy-only inputs retain the earlier 4h,
+    previous-day and clustered-15m behavior for reproducible replay tests.
     """
 
-    active = [level for level in levels if level.symbol == symbol and level_active_at(level, now_ms)]
+    source = [level for level in levels if level.symbol == symbol]
+    active = [level for level in source if level_active_at(level, now_ms)]
+    has_digash_catalog = any(level.level_version == DIGASH_LEVEL_VERSION for level in source)
+    digash = [level for level in active if level.level_version == DIGASH_LEVEL_VERSION]
+    if has_digash_catalog:
+        return sorted(
+            digash,
+            key=lambda level: (
+                level.timeframe,
+                level.side.value,
+                level.price,
+                level.confirmed_at_ms,
+                level.level_id,
+            ),
+        )
     four_hour = [level for level in active if level.timeframe == "4h"]
     previous_day = [
         level for level in active if level.timeframe == "15m" and level.level_class == "previous_day"
@@ -259,6 +274,8 @@ def canonical_level_view(
 
 
 __all__ = [
+    "DIGASH_LEVEL_TIMEFRAMES",
+    "DIGASH_LEVEL_VERSION",
     "Level",
     "LevelSide",
     "canonical_level_catalog",

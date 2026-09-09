@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen protocol version: v2.4.0, dated 2026-09-09. It introduces one canonical
+Frozen protocol version: v2.5.0, dated 2026-09-09. It introduces one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
 Numerical strategy thresholds are unchanged.
@@ -18,7 +18,7 @@ identifiers:
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.4.0` because target eligibility, level
+The top-level protocol version is `v2.5.0` because target eligibility, level
 lifecycle persistence, and the recorded metric/coverage contract changed. The
 metric and liquidity observations do not participate in trade eligibility.
 The `session_policy` binds a
@@ -55,21 +55,29 @@ The evaluator accepts immutable input dataclasses:
 
 - `Level`
 - `OrderflowFrame`
-- completed bar sequences keyed by timeframe such as `15s`, `1m`, `5m`,
-  `15m`, and `4h`
+- completed bar sequences keyed by timeframe. Runtime horizontal levels use
+  `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`; `15s` remains the
+  order-flow/footprint input.
 
 No decision may read bars or orderflow with timestamps later than the
 evaluation timestamp. Future data is ignored, not backfilled.
 
 ### Level lifecycle
 
+The runtime detector uses the latest 1,000 completed bars per supported
+timeframe and a 40-bar centred unique-extremum hypothesis. The latest 20 bars
+are excluded from candidate search. Merge tolerance is officially documented
+at 0.20% for 1m and 1.25% for 1d; intermediate timeframe values use a
+versioned log-time interpolation hypothesis and are not claimed as exact
+Digash values. The former 15m/4h-only level engines are retained only as
+historical provenance, not as runtime level sources.
+
 A confirmed horizontal level remains eligible until its first causal,
 close-based break. A HIGH breaks above and a LOW breaks below by at least one
 instrument tick when either of these conditions is first met:
 
 - two consecutive completed 1m candles close beyond the level; or
-- one completed candle on the level's own 15m/4h source timeframe closes
-  beyond it.
+- one completed candle on the level's own source timeframe closes beyond it.
 
 A wick beyond the price and a single 1m close followed by a reclaim do not
 break the level. This preserves the failed-sweep/reclaim hypothesis. Once

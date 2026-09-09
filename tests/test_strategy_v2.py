@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from sniper_paper.levels import DIGASH_LEVEL_TIMEFRAMES, DIGASH_LEVEL_VERSION
 from sniper_paper.market import Bar
 from sniper_paper.paper import Side
 from sniper_paper.strategy_v2 import (
@@ -283,6 +284,31 @@ def test_nearest_target_is_symmetric_for_both_sides() -> None:
     assert short_target is not None
     assert long_target.price == pytest.approx(100.8)
     assert short_target.price == pytest.approx(99.2)
+
+
+def test_canonical_target_selection_accepts_digash_levels_from_every_timeframe() -> None:
+    for timeframe in sorted(DIGASH_LEVEL_TIMEFRAMES):
+        level = Level(
+            f"digash-{timeframe}",
+            "XUSDT",
+            timeframe,
+            LevelSide.HIGH,
+            100.8,
+            0,
+            level_class="digash_extreme",
+            level_version=DIGASH_LEVEL_VERSION,
+        )
+        target = _nearest_target(
+            [level],
+            symbol="XUSDT",
+            side=Side.LONG,
+            price=100.0,
+            now_ms=1_000,
+            timeframes=DIGASH_LEVEL_TIMEFRAMES,
+            canonical=True,
+        )
+        assert target is not None
+        assert target.timeframe == timeframe
 
 
 def test_nearest_target_skips_levels_broken_as_of_evaluation_time() -> None:

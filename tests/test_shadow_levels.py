@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import pairwise
 
 from sniper_paper.levels import LevelSide
 from sniper_paper.market import Bar
-from sniper_paper.shadow_levels import GeometryConfig, build_reference_levels, reference_levels
+from sniper_paper.shadow_levels import (
+    CANONICAL_TIMEFRAMES,
+    DEFAULT_MERGE_TOLERANCE_BP,
+    GeometryConfig,
+    build_digash_levels,
+    build_reference_levels,
+    reference_levels,
+)
 
 INTERVAL = 60_000
 
@@ -43,7 +51,7 @@ def test_future_bars_do_not_change_result_as_of_evaluation_time() -> None:
 
 def test_wick_or_close_break_rule_omits_already_broken_extreme() -> None:
     rows = make_bars(highs=(40,))
-    rows[65] = replace(rows[65], high=111.0, close=100.0)
+    rows[60] = replace(rows[60], high=111.0, close=100.0)
 
     close_result = build_reference_levels(rows, timeframe="1m", config=GeometryConfig(break_rule="close"))
     wick_result = build_reference_levels(rows, timeframe="1m", config=GeometryConfig(break_rule="wick"))
@@ -61,7 +69,7 @@ def test_nearby_extremes_merge_with_zone_touch_and_provenance_metadata() -> None
 
     assert len(result.levels) == 1
     level = result.levels[0]
-    assert level.level_class == "shadow_cluster"
+    assert level.level_class == "digash_cluster"
     assert level.touches == 2
     assert level.zone_low == 110.0 == level.zone_high
     assert len(level.provenance["member_level_ids"]) == 2
@@ -85,3 +93,31 @@ def test_gaps_and_short_history_are_explicit_coverage_metadata() -> None:
     assert result.coverage.interior_gap_count == 1
     assert result.coverage.interior_missing_bars == 1
     assert result.coverage.gaps[0]["missing_bars"] == 1
+    assert not any(level.price == 110.0 for level in result.levels)
+
+
+def test_canonical_timeframes_and_versioned_tolerance_hypothesis() -> None:
+    assert CANONICAL_TIMEFRAMES == ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
+    assert DEFAULT_MERGE_TOLERANCE_BP["1m"] == 20.0
+    assert DEFAULT_MERGE_TOLERANCE_BP["1d"] == 125.0
+    assert all(
+        DEFAULT_MERGE_TOLERANCE_BP[left] < DEFAULT_MERGE_TOLERANCE_BP[right]
+        for left, right in pairwise(CANONICAL_TIMEFRAMES)
+    )
+
+
+def test_detector_caps_to_latest_1000_completed_bars_and_has_canonical_alias() -> None:
+    rows = make_bars(1_080, highs=(40, 1_020))
+    result = build_digash_levels(rows, timeframe="1m")
+    assert result.coverage.received_bars == 1_080
+    assert result.coverage.used_bars == 1_000
+    assert all(level.origin_at_ms >= rows[80].opened_at_ms for level in result.levels)
+
+
+def test_post_confirmation_break_is_left_for_instrument_aware_runtime_lifecycle() -> None:
+    rows = make_bars(120, highs=(40,))
+    rows[65] = replace(rows[65], close=111.0, high=111.0)
+    before_break = build_reference_levels(rows, timeframe="1m", now_ms=rows[60].closed_at_ms)
+    after_break = build_reference_levels(rows, timeframe="1m", now_ms=rows[66].closed_at_ms)
+    assert any(level.price == 110.0 for level in before_break.levels)
+    assert any(level.price == 110.0 for level in after_break.levels)

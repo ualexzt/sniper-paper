@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from sniper_paper.app import BAR_RETENTION, HISTORY_LIMIT, PaperApp, SymbolState, _history_diagnostics, _parse_klines
+from sniper_paper.app import (
+    BAR_RETENTION,
+    DIGASH_LEVEL_VERSION,
+    HISTORY_LIMIT,
+    PaperApp,
+    SymbolState,
+    _history_diagnostics,
+    _parse_klines,
+)
 from sniper_paper.market import Bar, Trade
 from sniper_paper.orderflow import Footprint
 from sniper_paper.paper import PaperSignal, Side
@@ -41,7 +49,7 @@ def test_history_diagnostics_distinguish_internal_gap_from_short_contiguous_hist
 
 
 def test_bootstrap_requests_and_retains_1000_completed_bars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    now_ms = 20_000_000_000
+    now_ms = 100_000_000_000
 
     class KlineClient:
         def __init__(self) -> None:
@@ -50,7 +58,15 @@ def test_bootstrap_requests_and_retains_1000_completed_bars(tmp_path: Path, monk
         def get_kline(self, **kwargs: object) -> dict[str, object]:
             self.calls.append(kwargs)
             interval = str(kwargs["interval"])
-            milliseconds = {"1": 60_000, "5": 300_000, "15": 900_000, "240": 14_400_000}[interval]
+            milliseconds = {
+                "1": 60_000,
+                "5": 300_000,
+                "15": 900_000,
+                "30": 1_800_000,
+                "60": 3_600_000,
+                "240": 14_400_000,
+                "D": 86_400_000,
+            }[interval]
             rows = [
                 [
                     str(i * milliseconds),
@@ -72,13 +88,79 @@ def test_bootstrap_requests_and_retains_1000_completed_bars(tmp_path: Path, monk
 
     asyncio.run(app._bootstrap(state))
 
-    assert len(client.calls) == 4
+    assert len(client.calls) == 7
     assert {call["limit"] for call in client.calls} == {HISTORY_LIMIT}
-    assert all(len(state.bars[name]) == BAR_RETENTION for name in ("1m", "5m", "15m", "4h"))
+    level_timeframes = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
+    assert all(len(state.bars[name]) == BAR_RETENTION for name in level_timeframes)
     assert all(
         state.history_diagnostics[name]["coverage_status"] == "complete"
-        for name in ("1m", "5m", "15m", "4h")
+        for name in level_timeframes
     )
+
+
+def test_digash_refresh_drops_aged_active_levels_but_retains_broken_history(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    state.levels = [
+        Level(
+            "aged-active",
+            "XUSDT",
+            "1m",
+            LevelSide.HIGH,
+            110,
+            1,
+            level_class="digash_extreme",
+            level_version=DIGASH_LEVEL_VERSION,
+        ),
+        Level(
+            "broken",
+            "XUSDT",
+            "1h",
+            LevelSide.LOW,
+            90,
+            1,
+            level_class="digash_extreme",
+            level_version=DIGASH_LEVEL_VERSION,
+            broken_at_ms=2,
+        ),
+    ]
+
+    app._refresh_digash_levels(state, 10)
+
+    assert [level.level_id for level in state.levels] == ["broken"]
+
+
+def test_digash_refresh_then_lifecycle_reconstructs_and_preserves_historical_break(
+    tmp_path: Path,
+) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT", tick_size=0.01)
+    rows = [
+        Bar(
+            "XUSDT",
+            60_000,
+            index * 60_000,
+            (index + 1) * 60_000,
+            100.0,
+            110.0 if index == 40 else (110.02 if index == 65 else (120.0 if index == 70 else 101.0)),
+            99.0,
+            110.02 if index == 65 else 100.0,
+            1.0,
+            0.0,
+            1,
+        )
+        for index in range(120)
+    ]
+    state.bars["1m"] = rows
+    now_ms = rows[-1].closed_at_ms
+
+    app._refresh_digash_levels(state, now_ms)
+    app._refresh_level_lifecycle(state, now_ms)
+    broken = next(level for level in state.levels if level.origin_at_ms == rows[40].opened_at_ms)
+    assert broken.broken_at_ms == rows[65].closed_at_ms
+
+    app._refresh_digash_levels(state, now_ms)
+    assert next(level for level in state.levels if level.level_id == broken.level_id).broken_at_ms == broken.broken_at_ms
 
 
 def test_market_detail_exposes_real_state_and_rejects_out_of_universe(tmp_path: Path) -> None:

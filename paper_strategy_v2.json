@@ -1,10 +1,10 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.4.0",
+  "version": "v2.5.0",
   "status": "frozen_spec",
   "versions": {
-    "strategy": "v2.3.0",
-    "level": "canonical_level_catalog_v1",
+    "strategy": "v2.4.0-digash-levels",
+    "level": "digash_horizontal_levels_v1",
     "universe": "daily_universe_v2_shadow_metrics",
     "execution": "paper_execution_v1",
     "source_data_contract": "bybit_public_market_data_v1"
@@ -32,8 +32,22 @@
     "retroactive_additions_allowed": false
   },
   "market_data_policy": {
-    "required_timeframes": ["15s", "1m", "5m", "15m", "4h"],
+    "required_timeframes": ["15s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"],
     "sources": ["orderbook", "trades"]
+  },
+  "horizontal_level_policy": {
+    "runtime_source": "digash_horizontal_levels_v1",
+    "completed_bars_only": true,
+    "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
+    "history_bars": 1000,
+    "extremum_search_period": 40,
+    "right_exclusion_bars": 20,
+    "merge_tolerance_endpoints_bp": {"1m": 20.0, "1d": 125.0},
+    "pivot_rule": "digash_unique_centered_40_hypothesis_v1",
+    "intermediate_tolerance_rule": "digash_tolerance_log_time_hypothesis_v1",
+    "break_rule": "completed_close",
+    "reactivation_allowed": false,
+    "legacy_15m_4h_runtime_allowed": false
   },
   "shadow_diagnostics_policy": {
     "enabled": true,

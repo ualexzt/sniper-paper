@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 
 from .levels import (
     Level,
@@ -319,7 +320,7 @@ def previous_utc_day_levels(symbol: str, bars_15m: Sequence[Bar], now_ms: int) -
         len(rows) != expected
         or rows[0].opened_at_ms != previous_start
         or rows[-1].closed_at_ms != today
-        or any(current.opened_at_ms != previous.closed_at_ms for previous, current in zip(rows, rows[1:]))
+        or any(current.opened_at_ms != previous.closed_at_ms for previous, current in pairwise(rows))
     ):
         return []
     high = max(bar.high for bar in rows)

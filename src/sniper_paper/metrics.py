@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from statistics import fmean, pstdev
 from typing import Any
 
@@ -347,7 +348,7 @@ def _contiguous(bars: Sequence[Any]) -> bool:
     if timeframe is None:
         return False
     step = timeframe * 60_000
-    return all(_opened(current) - _opened(previous) == step for previous, current in zip(bars, bars[1:]))
+    return all(_opened(current) - _opened(previous) == step for previous, current in pairwise(bars))
 
 
 def _contiguous_count(bars: Sequence[Any]) -> int:
@@ -358,7 +359,7 @@ def _contiguous_count(bars: Sequence[Any]) -> int:
     if timeframe is None:
         return count
     step = timeframe * 60_000
-    for previous, current in zip(bars, bars[1:]):
+    for previous, current in pairwise(bars):
         if _opened(current) - _opened(previous) != step:
             break
         count += 1

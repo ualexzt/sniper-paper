@@ -136,6 +136,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("market?.orderflow", html)
         self.assertIn('id="y-auto"', html)
         self.assertIn('id="chart-panel"', html)
+        for timeframe in ("1m", "5m", "15m", "30m", "1h", "4h", "1d"):
+            self.assertIn(f'data-tf="{timeframe}"', html)
         self.assertIn('id="fullscreen-chart"', html)
         self.assertIn("requestFullscreen", html)
         self.assertIn("fullscreenchange", html)
