@@ -10,10 +10,27 @@ Last updated: 2026-09-10 (Europe/Kyiv)
 - Remote checkout: `/home/ubuntu/sniper-paper`.
 - Dashboard: loopback-only port `8080` (use an SSH tunnel).
 
-## Unreleased v2.6.0
+## Release v2.6.0
 
 - Adds paper-only `paper_profit_protection_shadow_v2` counterfactual exits.
-- Thresholds are hypotheses; baseline fixed SL/TP and execution are unchanged.
+- The price-only path activates from net executable PnL at 1R and records an
+  exit after a 0.5R giveback from its monotonic high-water floor. The second
+  path also requires normalized adverse aggressive delta and a completed 15s
+  close through the preceding bucket's protective extreme.
+- Both paths include entry/exit fees and configured exit slippage, resume from
+  persisted MFE after restart, and settle against the baseline result when no
+  earlier shadow exit occurs. Incomplete, reconnect and warmup footprints do
+  not confirm orderflow exits.
+- Thresholds are frozen hypotheses; baseline fixed SL/TP and execution are
+  unchanged.
+- Deployed code commit: `4fdfc40` at 2026-09-10 12:57 UTC. Pre-release database
+  backup: `runtime/paper.db.pre-v2.6.0-20260910T125645Z`; a separate migrated
+  copy passed SQLite integrity and schema-6 checks before restart.
+- Post-deploy: container healthy, restart count 0, OOM false, WebSocket
+  connected, 10/10 books ready, API HTTP 200 and SQLite integrity check `ok`.
+  The existing PONSUSDT position restored; its first price-only observation is
+  retained, but the mid-day protocol change makes this UTC session observation
+  only. Forward evaluation can start after the next complete UTC selection.
 
 ## Release v2.5.2
 
