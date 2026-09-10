@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
-DIGASH_LEVEL_VERSION = "digash_horizontal_levels_v2"
+DIGASH_LEVEL_VERSION = "digash_horizontal_levels_v3_touch_episodes"
 DIGASH_LEVEL_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h", "1d"})
+_TIMEFRAME_ORDER = {name: index for index, name in enumerate(("1m", "5m", "15m", "30m", "1h", "4h", "1d"))}
 
 
 class LevelSide(str, Enum):
@@ -270,7 +271,30 @@ def canonical_level_view(
     if limit < 0:
         raise ValueError("limit must be non-negative")
     catalog = canonical_level_catalog(levels, symbol, now_ms, **kwargs)
-    return sorted(catalog, key=lambda level: (abs(level.price - price), -level.confirmed_at_ms, level.level_id))[:limit]
+    ordered = sorted(catalog, key=lambda level: (abs(level.price - price), -level.confirmed_at_ms, level.level_id))
+    # Presentation-only de-duplication.  The trading catalogue above remains
+    # untouched: cross-timeframe levels do not share IDs and their touches are
+    # never added together.
+    grouped: dict[tuple[LevelSide, float], Level] = {}
+    for level in ordered:
+        key = (level.side, level.price)
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = level
+            continue
+        members = list(current.provenance.get("display_timeframes", (current.timeframe,)))
+        if level.timeframe not in members:
+            members.append(level.timeframe)
+        provenance = {
+            **current.provenance,
+            "display_group": True,
+            "display_timeframes": sorted(set(members), key=lambda name: _TIMEFRAME_ORDER.get(name, 999)),
+            "display_member_level_ids": [
+                *current.provenance.get("display_member_level_ids", (current.level_id,)), level.level_id
+            ],
+        }
+        grouped[key] = replace(current, provenance=provenance)
+    return list(grouped.values())[:limit]
 
 
 __all__ = [

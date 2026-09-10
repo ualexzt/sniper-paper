@@ -1,5 +1,16 @@
 # sniper-paper operational handoff
 
+## Release v2.7.0 — level touch episodes (2026-09-10)
+
+- The Digash level detector is bumped to
+  `digash_horizontal_levels_v3_touch_episodes`.
+- Equal separated extrema, continuous plateaus, causal return episodes, and
+  absorbing break cutoffs are implemented and version-labelled. Cross-timeframe
+  exact-price grouping is presentation-only; the trading catalogue is unchanged.
+- The exact Digash pivot, touch-separation, and intermediate-TF tolerance rules
+  remain unpublished. These choices are explicitly versioned hypotheses.
+- Deployment verification is recorded below after rollout.
+
 Last updated: 2026-09-10 (Europe/Kyiv)
 
 ## Safety boundary

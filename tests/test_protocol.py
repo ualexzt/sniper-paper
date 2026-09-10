@@ -64,10 +64,10 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
     payload = json.loads(v2_path.read_text(encoding="utf-8"))
 
-    assert payload["version"] == "v2.6.0"
+    assert payload["version"] == "v2.7.0"
     assert payload["versions"] == {
         "strategy": "v2.5.2-uniform-risk-brackets",
-        "level": "digash_horizontal_levels_v2",
+        "level": "digash_horizontal_levels_v3_touch_episodes",
         "universe": "daily_universe_v2_shadow_metrics",
         "execution": "paper_execution_v2_dust_guard",
         "profit_protection": "paper_profit_protection_shadow_v2",
@@ -82,14 +82,17 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
         "protocol_hash_required": True,
     }
     assert payload["horizontal_level_policy"] == {
-        "runtime_source": "digash_horizontal_levels_v2",
+        "runtime_source": "digash_horizontal_levels_v3_touch_episodes",
         "completed_bars_only": True,
         "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
         "history_bars": 1000,
         "extremum_search_period": 40,
         "right_exclusion_bars": 20,
         "merge_tolerance_endpoints_bp": {"1m": 20.0, "1d": 125.0},
-        "pivot_rule": "digash_unique_centered_40_hypothesis_v1",
+        "pivot_rule": "digash_plateau_seed_40_hypothesis_v2",
+        "touch_rule": "digash_return_episode_departure_v1",
+        "touch_tolerance_rule": "same_as_timeframe_merge_tolerance",
+        "touch_departure_bp": 1.0,
         "intermediate_tolerance_rule": "digash_tolerance_log_time_hypothesis_v1",
         "break_rule": "completed_close",
         "reactivation_allowed": False,

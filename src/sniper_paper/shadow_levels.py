@@ -3,9 +3,10 @@
 The documented contract supplies the latest 1,000 completed bars, a 40-bar
 extremum-search period, a 20-bar right exclusion, and tolerance endpoints
 (0.20% at 1m and 1.25% at 1d).  The exact pivot shape and intermediate
-tolerances are not public.  This adaptation therefore versions both choices:
-a unique extremum in a centred 40-bar window and monotonic linear
-interpolation in log-time.  They must not be described as exact Digash values.
+tolerances are not public.  This adaptation therefore versions its choices:
+plateau-aware extrema in a centred 40-bar window, return-touch episodes, and
+monotonic linear interpolation in log-time.  They must not be described as
+exact Digash values.
 Only completed :class:`~sniper_paper.market.Bar` objects supplied by the caller
 are considered.
 """
@@ -45,7 +46,11 @@ CANONICAL_TIMEFRAMES = tuple(
 )
 _TOLERANCE_ENDPOINTS_BP = {"1m": 20.0, "1d": 125.0}
 TOLERANCE_HYPOTHESIS_VERSION = "digash_tolerance_log_time_hypothesis_v1"
-PIVOT_HYPOTHESIS_VERSION = "digash_unique_centered_40_hypothesis_v1"
+PIVOT_HYPOTHESIS_VERSION = "digash_plateau_seed_40_hypothesis_v2"
+# Digash does not publish the touch episode rule.  Keep this explicit so a
+# future replay can distinguish these observations from the documented scan.
+TOUCH_HYPOTHESIS_VERSION = "digash_return_episode_departure_v1"
+TOUCH_TOLERANCE_HYPOTHESIS_VERSION = "digash_touch_merge_tolerance_v1"
 
 
 def _default_tolerances_bp() -> dict[str, float]:
@@ -81,6 +86,7 @@ class GeometryConfig:
     break_rule: BreakRule = "close"
     break_buffer_bp: float = 0.0
     level_version: str = DIGASH_LEVEL_VERSION
+    touch_departure_bp: float = 1.0
 
     def tolerance_for(self, timeframe: str) -> float:
         raw = (
@@ -102,6 +108,8 @@ class GeometryConfig:
             raise ValueError("break_rule must be 'wick' or 'close'")
         if not math.isfinite(self.break_buffer_bp) or self.break_buffer_bp < 0:
             raise ValueError("break buffer must be finite and non-negative")
+        if not math.isfinite(self.touch_departure_bp) or self.touch_departure_bp < 0:
+            raise ValueError("touch departure must be finite and non-negative")
         if not self.level_version:
             raise ValueError("level_version is required")
         self.tolerance_for(timeframe)
@@ -185,7 +193,20 @@ def build_reference_levels(
         window = rows[index - half_left : index + half_right + 1]
         high_values = [item.high for item in window]
         low_values = [item.low for item in window]
-        if pivot.high == max(high_values) and high_values.count(pivot.high) == 1:
+        # Equal extrema separated by ordinary bars are independent candidates.
+        # Only collapse a continuous flat run (one plateau event).  A flat
+        # baseline is not an extremum because it has no opposing excursion.
+        high_is_seed = (
+            pivot.high == max(high_values)
+            and pivot.high > min(high_values)
+            and not _same_value_neighbour(rows, index, pivot.high, LevelSide.HIGH)
+        )
+        low_is_seed = (
+            pivot.low == min(low_values)
+            and pivot.low < max(low_values)
+            and not _same_value_neighbour(rows, index, pivot.low, LevelSide.LOW)
+        )
+        if high_is_seed:
             confirmed_index = confirmation_index
             if not _broken_before_confirmation(
                 rows, index, confirmation_index, pivot.high, LevelSide.HIGH, config
@@ -193,7 +214,7 @@ def build_reference_levels(
                 candidates.append(
                     _candidate_level(pivot, LevelSide.HIGH, confirmed_index, rows[confirmed_index].closed_at_ms, timeframe, config)
                 )
-        if pivot.low == min(low_values) and low_values.count(pivot.low) == 1:
+        if low_is_seed:
             confirmed_index = confirmation_index
             if not _broken_before_confirmation(
                 rows, index, confirmation_index, pivot.low, LevelSide.LOW, config
@@ -272,10 +293,18 @@ def build_reference_levels(
             timeframe,
             config.tolerance_for(timeframe),
             config.level_version,
+            rows=rows,
+            break_rule=config.break_rule,
+            break_buffer_bp=config.break_buffer_bp,
+            touch_departure_bp=config.touch_departure_bp,
         )
         return GeometryResult(tuple(_sort_levels([*broken, *merged])), coverage)
 
-    merged = _merge_candidates(candidates, timeframe, config.tolerance_for(timeframe), config.level_version)
+    merged = _merge_candidates(
+        candidates, timeframe, config.tolerance_for(timeframe), config.level_version,
+        rows=rows, break_rule=config.break_rule, break_buffer_bp=config.break_buffer_bp,
+        touch_departure_bp=config.touch_departure_bp,
+    )
     return GeometryResult(tuple(merged), coverage)
 
 
@@ -402,6 +431,8 @@ def _candidate_level(
             "right_exclusion": config.right_exclusion,
             "confirmation_index": confirmed_index,
             "break_rule": config.break_rule,
+            "touch_hypothesis_version": TOUCH_HYPOTHESIS_VERSION,
+            "ray_anchor_at_ms": pivot.opened_at_ms,
         },
     )
 
@@ -427,8 +458,17 @@ def _broken_before_confirmation(
     return False
 
 
+def _same_value_neighbour(rows: Sequence[Bar], index: int, value: float, side: LevelSide) -> bool:
+    """Return true after the first bar of a continuous flat plateau."""
+    field = "high" if side is LevelSide.HIGH else "low"
+    neighbour = index - 1
+    return neighbour >= 0 and getattr(rows[neighbour], field) == value
+
+
 def _merge_candidates(
-    candidates: Sequence[Level], timeframe: str, tolerance_bp: float, level_version: str
+    candidates: Sequence[Level], timeframe: str, tolerance_bp: float, level_version: str,
+    *, rows: Sequence[Bar] = (), break_rule: BreakRule = "close",
+    break_buffer_bp: float = 0.0, touch_departure_bp: float = 1.0,
 ) -> list[Level]:
     result: list[Level] = []
     used: set[str] = set()
@@ -451,6 +491,12 @@ def _merge_candidates(
         level_id = hashlib.sha256(f"digash-cluster:{level_version}:{timeframe}:{':'.join(ids)}".encode()).hexdigest()[:20]
         origin = min(item.origin_at_ms or item.confirmed_at_ms for item in group)
         confirmed = max(item.confirmed_at_ms for item in group)
+        episode_touches = (
+            _touch_episode_count(
+                rows, group, zone_low, zone_high, break_rule,
+                break_buffer_bp, touch_departure_bp, tolerance_bp,
+            ) if rows else sum(item.touches for item in group)
+        )
         result.append(
             Level(
                 level_id,
@@ -459,8 +505,8 @@ def _merge_candidates(
                 candidate.side,
                 min(prices) if candidate.side is LevelSide.HIGH else max(prices),
                 confirmed,
-                touches=sum(item.touches for item in group),
-                level_class="digash_cluster" if len(group) > 1 else "digash_extreme",
+                touches=episode_touches,
+                level_class="digash_cluster" if episode_touches > 1 else "digash_extreme",
                 origin_at_ms=origin,
                 zone_low=zone_low,
                 zone_high=zone_high,
@@ -471,12 +517,71 @@ def _merge_candidates(
                     "pivot_hypothesis_version": PIVOT_HYPOTHESIS_VERSION,
                     "tolerance_hypothesis_version": TOLERANCE_HYPOTHESIS_VERSION,
                     "member_level_ids": ids,
-                    "touch_events": sorted(item.origin_at_ms for item in group if item.origin_at_ms is not None),
+                    "touch_events": _touch_episode_times(
+                        rows, group, zone_low, zone_high, break_rule,
+                        break_buffer_bp, touch_departure_bp, tolerance_bp,
+                    ) if rows else sorted(item.origin_at_ms for item in group if item.origin_at_ms is not None),
+                    "touch_hypothesis_version": TOUCH_HYPOTHESIS_VERSION,
+                    "touch_tolerance_hypothesis_version": TOUCH_TOLERANCE_HYPOTHESIS_VERSION,
+                    "touch_tolerance_bp": tolerance_bp,
+                    "touch_departure_bp": touch_departure_bp,
+                    "ray_anchor_at_ms": min(
+                        item.origin_at_ms or item.confirmed_at_ms for item in group
+                        if item.price == (min(prices) if candidate.side is LevelSide.HIGH else max(prices))
+                    ),
                     "merge_tolerance_bp": tolerance_bp,
                 },
             )
         )
     return sorted(result, key=lambda item: (item.side.value, item.price, item.origin_at_ms or 0, item.level_id))
+
+
+def _touch_episode_count(
+    rows: Sequence[Bar], group: Sequence[Level], zone_low: float, zone_high: float,
+    break_rule: BreakRule, break_buffer_bp: float, departure_bp: float,
+    touch_tolerance_bp: float,
+) -> int:
+    return len(_touch_episode_times(rows, group, zone_low, zone_high, break_rule, break_buffer_bp, departure_bp, touch_tolerance_bp))
+
+
+def _touch_episode_times(
+    rows: Sequence[Bar], group: Sequence[Level], zone_low: float, zone_high: float,
+    break_rule: BreakRule, break_buffer_bp: float, departure_bp: float,
+    touch_tolerance_bp: float,
+) -> list[int]:
+    """Return seed plus distinct returns, stopping at the first causal break."""
+    if not rows:
+        return sorted(item.origin_at_ms for item in group if item.origin_at_ms is not None)
+    side = group[0].side
+    seed_times = {item.origin_at_ms for item in group if item.origin_at_ms is not None}
+    first = min(seed_times) if seed_times else rows[0].opened_at_ms
+    eps = max(abs((zone_low + zone_high) / 2) * 1e-12, 1e-12)
+    departure = departure_bp / 10_000
+    break_level = zone_high if side is LevelSide.HIGH else zone_low
+    events: list[int] = []
+    in_episode = False
+    for row in rows:
+        if row.opened_at_ms < first:
+            continue
+        observed = row.close if break_rule == "close" else (row.high if side is LevelSide.HIGH else row.low)
+        broken = (observed > break_level * (1 + break_buffer_bp / 10_000) + eps
+                  if side is LevelSide.HIGH else observed < break_level * (1 - break_buffer_bp / 10_000) - eps)
+        if broken:
+            break
+        tol = touch_tolerance_bp / 10_000
+        in_zone = (row.high >= zone_low * (1 - tol) - eps
+                   if side is LevelSide.HIGH else row.low <= zone_high * (1 + tol) + eps)
+        away = (row.close < zone_low * (1 - departure) - eps
+                if side is LevelSide.HIGH else row.close > zone_high * (1 + departure) + eps)
+        # Departure must be an actual exit from the zone.  A candle can have
+        # a low close while its wick still touches the zone; that is still the
+        # same continuous episode, not a departure followed by a new touch.
+        if in_zone and not in_episode:
+            events.append(row.opened_at_ms)
+            in_episode = True
+        elif away and not in_zone:
+            in_episode = False
+    return events or [first]
 
 
 __all__ = [
@@ -485,6 +590,8 @@ __all__ = [
     "PIVOT_HYPOTHESIS_VERSION",
     "TIMEFRAME_MS",
     "TOLERANCE_HYPOTHESIS_VERSION",
+    "TOUCH_HYPOTHESIS_VERSION",
+    "TOUCH_TOLERANCE_HYPOTHESIS_VERSION",
     "BreakRule",
     "GeometryConfig",
     "GeometryCoverage",

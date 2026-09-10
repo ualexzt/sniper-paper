@@ -384,7 +384,11 @@ class PaperApp:
         # Freeze existing cluster breaks before membership can change. Their
         # constituent IDs remain tombstones for subsequent detector runs.
         self._refresh_level_lifecycle(state, now_ms)
-        config = GeometryConfig(history_limit=HISTORY_LIMIT, level_version=DIGASH_LEVEL_VERSION)
+        config = GeometryConfig(
+            history_limit=HISTORY_LIMIT,
+            level_version=DIGASH_LEVEL_VERSION,
+            touch_departure_bp=float(self.protocol_data["horizontal_level_policy"]["touch_departure_bp"]),
+        )
         detected: list[Level] = []
         for timeframe in DIGASH_TIMEFRAMES:
             result = build_reference_levels(
