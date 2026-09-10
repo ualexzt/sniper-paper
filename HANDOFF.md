@@ -75,29 +75,24 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
-- Deployed code commit: `9a8c930`.
-- Deployed at: 2026-09-09 16:42 UTC.
+- Deployed code commit: `2ed84c5`.
+- Deployed at: 2026-09-10 12:18 UTC.
 - Dashboard-only follow-up: the right workspace now stays within the viewport,
   the paper-trading panel is pinned to the bottom, and the chart consumes the
   remaining height. Retired readiness, verified-metrics, active-level-list and
   orderflow blocks were removed from the operator UI; level rays remain on the
   chart and research diagnostics remain available through the read-only API.
 - Pre-release database backup:
-  `runtime/paper.db.pre-v2.5.1-20260909T161538Z`.
+  `runtime/paper.db.pre-v2.5.2-20260910T071523Z` (`integrity_check=ok`).
 - Post-deploy checks: container healthy, restart count 0, OOM false,
-  WebSocket connected, 8/8 books ready, dashboard HTTP 200, SQLite
-  `integrity_check=ok`, schema version 5. Active and broken
-  `digash_horizontal_levels_v2` rows exist on every one of the seven
-  timeframes; the read-only market API exposes only that level version.
-- Capture growth check: completed 15s rows increased from 65,337 to 65,361.
-  New-process heartbeats were 30 seconds apart, books 8/8, HTTP health 200.
-  CPU snapshots decreased from about 100% before deployment to 24% and 20%
-  after deployment. These are short operational checks, not a long soak test.
-- Local regression suite and Ruff passed. Independent reproductions cover
-  constituent/cluster resurrection, restart, version isolation, source-vs-fast
-  closes, incomplete buckets and batched durable upserts. An 8,000-trade bar
-  benchmark decreased from 5.21s to 0.039s; 1,000 unchanged level upserts took
-  0.023s in a batch versus 0.361s individually on the local machine.
-- The 2026-09-09 session is intentionally `partial_day_observation_only`
+  WebSocket connected, 10/10 books ready, HTTP health 200, SQLite
+  `integrity_check=ok`, schema version 5. The deployed image reports protocol
+  v2.5.2 and the expected strategy/execution version labels.
+- Five post-start heartbeats covered 120 seconds. There were no new BOOK,
+  STREAM_DISCONNECTED, or SIGNAL_REJECTED events and no new positions during
+  that short check. Historical UNI dust rows are preserved and exposed by the
+  API with `numerical_dust`; the dashboard omits them from trade history.
+- Local Ruff, 171 tests, a fresh Docker build and image smoke test passed.
+- The 2026-09-10 session is intentionally `partial_day_observation_only`
   because the protocol changed mid-day. Forward evaluation can become eligible
-  only after the next complete UTC-day selection and warmup.
+  only after the 2026-09-11 UTC selection and warmup.
