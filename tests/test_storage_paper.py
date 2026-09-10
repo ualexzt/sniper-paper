@@ -93,6 +93,49 @@ def test_wrong_trade_side_or_price_never_fills(tmp_path: Path) -> None:
     assert executor.position is None
 
 
+def test_float_queue_residue_is_not_a_position(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    signal = PaperSignal("dust", 0, "BTCUSDT", Side.LONG, "cascade_impulse", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=0)
+    assert executor.submit(signal, quote(0, bid_size=0.3), qty_step=0.1)
+    executor.on_quote("BTCUSDT", quote(0, bid_size=0.3))
+    result = executor.on_trade("BTCUSDT", 1, "Sell", 100.0, 0.1 + 0.2)
+    assert result and result["event"] == "QUEUE" and result["filled_qty"] == 0.0
+    assert executor.position is None
+
+
+def test_small_real_partial_fill_is_retained(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    signal = PaperSignal("partial", 0, "BTCUSDT", Side.LONG, "cascade_impulse", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=0)
+    assert executor.submit(signal, quote(0, bid_size=0.3), qty_step=0.1)
+    executor.on_quote("BTCUSDT", quote(0, bid_size=0.3))
+    result = executor.on_trade("BTCUSDT", 1, "Sell", 100.0, 0.4)
+    assert result and result["event"] == "PARTIAL"
+    assert executor.position is not None and executor.position.quantity == pytest.approx(0.1)
+
+
+def test_small_partial_survives_large_order_scale_and_restore(tmp_path: Path) -> None:
+    database = tmp_path / "paper.db"
+    journal = Journal(database)
+    signal = PaperSignal("large", 0, "BTCUSDT", Side.LONG, "cascade_impulse", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=0)
+    assert executor.submit(signal, quote(0, bid_size=0.3), qty_step=0.00001)
+    assert executor.pending is not None
+    executor.pending.quantity = 1e12
+    journal.update_paper_order(executor.pending.order_id, quantity=1e12)
+    executor.on_quote("BTCUSDT", quote(0, bid_size=0.3))
+    result = executor.on_trade("BTCUSDT", 1, "Sell", 100.0, 0.30001)
+    assert result and result["event"] == "PARTIAL"
+    assert executor.position is not None and executor.position.quantity == pytest.approx(0.00001)
+    restored = PaperExecutor(journal, latency_ms=0)
+    assert restored.restore()
+    assert restored.position is not None and restored.position.quantity == pytest.approx(0.00001)
+
+
 def test_duplicate_signal_and_universe_day_are_rejected(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
     signal = PaperSignal("s1", 0, "BTCUSDT", Side.LONG, "early_target_hunt", 99, 102)

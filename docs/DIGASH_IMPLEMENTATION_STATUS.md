@@ -1,6 +1,11 @@
 # Digash change implementation status
 
-Date: 2026-09-09. Protocol: `paper_strategy_v2.json` v2.5.1.
+Date: 2026-09-10. Protocol: `paper_strategy_v2.json` v2.5.2.
+
+Execution follow-up: uniform executable-entry bracket/risk admission and
+numerical fill-residue protection. These fixes do not establish Digash
+fidelity for cascade/fresh-extreme or validate alternative TP/SL rules.
+See `AUDIT_2026-09-10.md` for the observed trades and unresolved differences.
 
 This is an implementation ledger, not evidence of profitability and not a
 claim that the undisclosed Digash level algorithm has been cloned exactly.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -733,20 +735,19 @@ class Journal:
                      AND um.selected=1 ORDER BY um.rank"""
             ).fetchall()
             positions = db.execute("SELECT * FROM positions WHERE status='OPEN' ORDER BY opened_at_ms").fetchall()
+            closed_positions = db.execute(
+                "SELECT * FROM positions WHERE status='CLOSED' ORDER BY closed_at_ms DESC"
+            ).fetchall()
             signals = db.execute(
                 "SELECT * FROM signals ORDER BY occurred_at_ms DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-            lane_pnl = db.execute(
-                """SELECT lane, COUNT(*) AS trades,
-                   SUM(CASE WHEN net_pnl>0 THEN 1 ELSE 0 END) AS wins,
-                   SUM(CASE WHEN net_pnl<=0 THEN 1 ELSE 0 END) AS losses,
-                   COALESCE(SUM(net_pnl), 0) AS net_pnl
-                   FROM positions WHERE status='CLOSED' GROUP BY lane ORDER BY lane"""
-            ).fetchall()
             last_event = db.execute("SELECT * FROM service_events ORDER BY occurred_at_ms DESC LIMIT 1").fetchone()
             recent_events = db.execute("SELECT * FROM service_events ORDER BY occurred_at_ms DESC LIMIT 50").fetchall()
             meta = db.execute("SELECT key,value FROM meta").fetchall()
+            now_ms = int(time.time() * 1000)
+            annotated_open = _annotate_position_rows(db, [dict(row) for row in positions], now_ms)
+            annotated_closed = _annotate_position_rows(db, [dict(row) for row in closed_positions], now_ms)
         universe_rows = []
         for row in universe:
             item = dict(row)
@@ -755,9 +756,17 @@ class Journal:
             universe_rows.append(item)
         return {
             "universe": universe_rows,
-            "positions": [dict(row) for row in positions],
+            "positions": annotated_open,
             "signals": [dict(row) for row in signals],
-            "lane_pnl": [dict(row) for row in lane_pnl],
+            # Keep the established lane report comparable, except for known
+            # numerical dust.  ``eligible_lane_pnl`` is the stricter report
+            # excluding positions observed during a stream gap/restart.
+            "lane_pnl": _lane_pnl(annotated_closed, exclude_dust=True),
+            "raw_lane_pnl": _lane_pnl(annotated_closed, clean=False),
+            "eligible_lane_pnl": _lane_pnl(annotated_closed, clean=True),
+            "quality_reasons": sorted(
+                {reason for item in annotated_closed + annotated_open for reason in item["quality_reasons"]}
+            ),
             "last_event": dict(last_event) if last_event else None,
             "recent_events": [dict(row) for row in recent_events],
             "meta": {str(row["key"]): str(row["value"]) for row in meta},
@@ -769,7 +778,7 @@ class Journal:
                 "SELECT * FROM positions WHERE status='CLOSED' ORDER BY closed_at_ms DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+            return _annotate_position_rows(db, [dict(row) for row in rows], int(time.time() * 1000))
 
     def open_position_row(self) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -874,6 +883,90 @@ class Journal:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+# This is intentionally far below ordinary exchange quantities (including
+# small-cap crypto positions), and only catches historical floating-point
+# residue such as 5e-15.  It is a reporting annotation, not an execution gate.
+NUMERICAL_DUST_QTY = 1e-12
+
+
+def _annotate_position_rows(
+    db: sqlite3.Connection, rows: list[dict[str, Any]], now_ms: int
+) -> list[dict[str, Any]]:
+    """Add derived data-quality labels without mutating journal rows."""
+    if not rows:
+        return []
+    starts = [int(row["opened_at_ms"]) for row in rows]
+    ends = [int(row.get("closed_at_ms") or now_ms) for row in rows]
+    lower, upper = min(starts), max(ends)
+    events = db.execute(
+        """SELECT occurred_at_ms, kind FROM service_events
+           WHERE occurred_at_ms>=? AND occurred_at_ms<=?
+             AND kind IN ('STREAM_DISCONNECTED', 'START')
+           ORDER BY occurred_at_ms""",
+        (lower, upper),
+    ).fetchall()
+    event_rows = [(int(event["occurred_at_ms"]), str(event["kind"])) for event in events]
+    event_times = [item[0] for item in event_rows]
+    result = []
+    for row in rows:
+        opened = int(row["opened_at_ms"])
+        closed = int(row.get("closed_at_ms") or now_ms)
+        reasons: list[str] = []
+        try:
+            quantity = float(row["quantity"])
+        except (TypeError, ValueError):
+            quantity = math.nan
+        notional = quantity * abs(float(row.get("entry_price") or 0.0)) if math.isfinite(quantity) else math.nan
+        if (
+            not math.isfinite(quantity)
+            or quantity <= NUMERICAL_DUST_QTY
+            and notional <= NUMERICAL_DUST_NOTIONAL
+        ):
+            reasons.append("numerical_dust")
+        first = bisect_left(event_times, opened)
+        last = bisect_right(event_times, closed)
+        kinds = {kind for _, kind in event_rows[first:last]}
+        if "STREAM_DISCONNECTED" in kinds:
+            reasons.append("stream_disconnected")
+        if "START" in kinds:
+            reasons.append("service_restart")
+        item = dict(row)
+        item["execution_quality_ok"] = not reasons
+        item["quality_reasons"] = reasons
+        result.append(item)
+    return result
+
+
+NUMERICAL_DUST_NOTIONAL = 1e-8
+
+
+def _lane_pnl(
+    rows: Sequence[Mapping[str, Any]], *, clean: bool = False, exclude_dust: bool = False
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        reasons = set(row["quality_reasons"])
+        if clean and reasons:
+            continue
+        if exclude_dust and "numerical_dust" in reasons:
+            continue
+        grouped.setdefault(str(row["lane"]), []).append(row)
+    result = []
+    for lane in sorted(grouped):
+        lane_rows = grouped[lane]
+        net_pnl = sum(float(row.get("net_pnl") or 0.0) for row in lane_rows)
+        result.append(
+            {
+                "lane": lane,
+                "trades": len(lane_rows),
+                "wins": sum(1 for row in lane_rows if float(row.get("net_pnl") or 0.0) > 0),
+                "losses": sum(1 for row in lane_rows if float(row.get("net_pnl") or 0.0) <= 0),
+                "net_pnl": net_pnl,
+            }
+        )
+    return result
 
 
 # Keep the SQL column order in one place so inserts, history snapshots, and

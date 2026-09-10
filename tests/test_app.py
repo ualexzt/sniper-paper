@@ -17,6 +17,7 @@ from sniper_paper.orderflow import Footprint
 from sniper_paper.paper import PaperSignal, Side
 from sniper_paper.storage import Journal
 from sniper_paper.strategy import Level, LevelSide
+from sniper_paper.strategy_v2 import DecisionStatus, StrategyDecision, StrategySignal
 
 
 def test_parse_klines_orders_oldest_first_and_excludes_forming() -> None:
@@ -28,6 +29,43 @@ def test_parse_klines_orders_oldest_first_and_excludes_forming() -> None:
     bars = _parse_klines("XUSDT", "1m", rows, 150_000)
     assert [item.opened_at_ms for item in bars] == [0, 60_000]
     assert bars[-1].close == 2.5
+
+
+def test_record_decision_rejects_bad_bracket_without_path_or_stream_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("ENAUSDT")
+    state.book.apply({"type": "snapshot", "data": {"s": "ENAUSDT", "u": 1, "seq": 1, "b": [["0.15060", "10"]], "a": [["0.15062", "10"]]}}, 1)
+    bad = StrategySignal(
+        "bad", 1, "ENAUSDT", Side.SHORT, "cascade_impulse", 0.15061527, 0.14622, 2_001, 60_001
+    )
+    decision = StrategyDecision(bad, "cascade_impulse", DecisionStatus.TRIGGERED.value, "frozen_rules_met", Side.SHORT, None, bad.target_price, bad.stop_price, bad.stop_price, "setup", {})
+    monkeypatch.setattr(app.executor, "submit", lambda *args, **kwargs: pytest.fail("invalid signal submitted"))
+    app._record_decision(state, decision, 0.15061, 1)
+    assert app.signal_paths == {}
+    assert journal.signal_row("bad")["status"] == "REJECTED"
+    assert journal.signal_row("bad")["reason"] == "invalid_signal_bracket"
+
+    monkeypatch.setattr(app.executor, "submit", lambda *args, **kwargs: False)
+    good = StrategySignal(
+        "good", 2, "ENAUSDT", Side.SHORT, "cascade_impulse", 0.151, 0.14622, 2_002, 60_002
+    )
+    good_decision = StrategyDecision(
+        good,
+        "cascade_impulse",
+        DecisionStatus.TRIGGERED.value,
+        "frozen_rules_met",
+        Side.SHORT,
+        None,
+        good.target_price,
+        good.stop_price,
+        good.stop_price,
+        "setup-good",
+        {},
+    )
+    app._record_decision(state, good_decision, 0.15061, 2)
+    assert "good" in app.signal_paths
+    assert journal.signal_row("good")["status"] == "MISSED"
 
 
 def test_history_diagnostics_distinguish_internal_gap_from_short_contiguous_history() -> None:

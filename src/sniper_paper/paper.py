@@ -339,14 +339,16 @@ class PaperExecutor:
         if taker_side != expected or not math.isclose(price, order.entry_price, rel_tol=0.0, abs_tol=1e-12):
             return None
         remaining_trade = max(0.0, quantity)
+        queue_before = order.queue_ahead_qty
         consumed = min(order.queue_ahead_qty, remaining_trade)
-        order.queue_ahead_qty -= consumed
+        order.queue_ahead_qty = max(0.0, order.queue_ahead_qty - consumed)
         remaining_trade -= consumed
-        fill_qty = min(order.remaining_qty, remaining_trade)
-        if fill_qty <= 0:
+        remaining_before_fill = order.remaining_qty
+        fill_qty = min(remaining_before_fill, remaining_trade)
+        if fill_qty <= self._quantity_epsilon(queue_before, quantity, consumed, remaining_trade):
             self.journal.update_paper_order(order.order_id, queue_ahead_qty=order.queue_ahead_qty)
             return {"event": "QUEUE", "queue_consumed": consumed, "filled_qty": 0.0}
-        self._fill(order, fill_qty, received_at_ms)
+        self._fill(order, fill_qty, received_at_ms, remaining_before_fill)
         return {
             "event": "OPEN" if order.status == "FILLED" else "PARTIAL",
             "position_id": self.position.position_id if self.position else None,
@@ -354,7 +356,13 @@ class PaperExecutor:
             "filled_qty": fill_qty,
         }
 
-    def _fill(self, order: PendingPaperOrder, fill_qty: float, received_at_ms: int) -> None:
+    def _fill(
+        self,
+        order: PendingPaperOrder,
+        fill_qty: float,
+        received_at_ms: int,
+        remaining_before_fill: float,
+    ) -> None:
         order.filled_qty += fill_qty
         entry_fee = order.entry_price * fill_qty * self.maker_fee_rate
         if self.position is None:
@@ -392,7 +400,7 @@ class PaperExecutor:
                 entry_price=self.position.entry_price,
                 entry_fee=self.position.entry_fee,
             )
-        order.status = "FILLED" if order.remaining_qty <= 1e-12 else "PARTIAL"
+        order.status = "FILLED" if order.remaining_qty <= self._quantity_epsilon(remaining_before_fill, fill_qty) else "PARTIAL"
         self.journal.update_paper_order(
             order.order_id,
             status=order.status,
@@ -401,6 +409,15 @@ class PaperExecutor:
         )
         if order.status == "FILLED":
             self.pending = None
+
+    @staticmethod
+    def _quantity_epsilon(*values: float) -> float:
+        """Ignore subtraction residue, while retaining genuine small fills."""
+        epsilon = max((math.ulp(abs(value)) for value in values if math.isfinite(value)), default=0.0)
+        # A subtraction can accumulate one rounding unit from each operand;
+        # the quantity step remains an execution constraint, not a reason to
+        # discard a legitimate partial below an arbitrary absolute threshold.
+        return 4.0 * epsilon
 
     def _close(self, quote: Quote, reason: str) -> Mapping[str, Any]:
         position = self.position

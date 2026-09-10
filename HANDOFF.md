@@ -1,6 +1,6 @@
 # sniper-paper operational handoff
 
-Last updated: 2026-09-09 (Europe/Kyiv)
+Last updated: 2026-09-10 (Europe/Kyiv)
 
 ## Safety boundary
 
@@ -10,7 +10,25 @@ Last updated: 2026-09-09 (Europe/Kyiv)
 - Remote checkout: `/home/ubuntu/sniper-paper`.
 - Dashboard: loopback-only port `8080` (use an SSH tunnel).
 
-## Release v2.5.1
+## Release v2.5.2
+
+- Every triggered v2 lane validates positive finite SL/entry/TP and the
+  configured 10–50 bp risk band using current executable entry.
+- The application also validates the signal-path reference before starting
+  a tracker. Invalid geometry is journaled as REJECTED without interrupting
+  the public stream.
+- Queue arithmetic suppresses floating-point residue using operand precision,
+  while preserving genuine small partial fills.
+- Position history derives numerical-dust and stream-gap/restart annotations
+  without rewriting the original rows. Dashboard hides dust trades and marks
+  gap-affected exits. Raw accounting remains available; quality-filtered lane
+  results are separate and do not establish complete source-data coverage.
+- Strategy/execution versions changed; a mid-day deployment remains
+  observation-only until the next complete UTC selection under this protocol.
+- Digash selection, cascade/fresh-extreme semantics and exact exit rules are
+  still unresolved as documented in `docs/AUDIT_2026-09-10.md`.
+
+## Previous release v2.5.1
 
 - Fixes the v2.5.0 cluster-resurrection defect by invalidating constituents
   before merging and retaining broken-cluster member tombstones. Runtime

@@ -64,12 +64,12 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
     payload = json.loads(v2_path.read_text(encoding="utf-8"))
 
-    assert payload["version"] == "v2.5.1"
+    assert payload["version"] == "v2.5.2"
     assert payload["versions"] == {
-        "strategy": "v2.4.0-digash-levels",
+        "strategy": "v2.5.2-uniform-risk-brackets",
         "level": "digash_horizontal_levels_v2",
         "universe": "daily_universe_v2_shadow_metrics",
-        "execution": "paper_execution_v1",
+        "execution": "paper_execution_v2_dust_guard",
         "source_data_contract": "bybit_public_market_data_v2_complete_buckets",
     }
     assert payload["session_policy"] == {

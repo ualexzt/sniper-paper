@@ -1413,6 +1413,49 @@ class StrategyV2Evaluator:
         return frame.book_age_ms <= self.max_book_age_ms and frame.spread_bp <= self.max_spread_bp
 
     def _trigger(self, candidate: _LaneCandidate, frame: OrderflowFrame) -> StrategyDecision:
+        # Every executable lane passes this final, side-aware gate.  Individual
+        # setup builders may use different stop geometry, but admission must
+        # always be measured from the executable top of book.
+        entry = frame.best_bid if candidate.side is Side.LONG else frame.best_ask
+        prices_valid = all(
+            math.isfinite(value) and value > 0
+            for value in (entry, candidate.stop_price, candidate.target_price)
+        )
+        bracket_valid = (
+            prices_valid
+            and candidate.stop_price < entry < candidate.target_price
+            if candidate.side is Side.LONG
+            else prices_valid and candidate.target_price < entry < candidate.stop_price
+        )
+        risk_bp = _level_distance_bp(entry, candidate.stop_price) if prices_valid else None
+        features = dict(candidate.features)
+        if risk_bp is not None:
+            features["risk_bp"] = risk_bp
+        if not bracket_valid:
+            return self._reject(
+                lane=candidate.lane,
+                reason="invalid_signal_bracket",
+                side=candidate.side,
+                target_level=candidate.target_level,
+                target_price=candidate.target_price,
+                stop_price=candidate.stop_price,
+                invalidation_price=candidate.invalidation_price,
+                setup_id=candidate.setup_id,
+                features=features,
+            )
+        risk_tolerance_bp = 1e-9
+        if risk_bp < self.min_risk_bp - risk_tolerance_bp or risk_bp > self.max_risk_bp + risk_tolerance_bp:
+            return self._reject(
+                lane=candidate.lane,
+                reason="risk_out_of_bounds",
+                side=candidate.side,
+                target_level=candidate.target_level,
+                target_price=candidate.target_price,
+                stop_price=candidate.stop_price,
+                invalidation_price=candidate.invalidation_price,
+                setup_id=candidate.setup_id,
+                features=features,
+            )
         self._last_triggered[(candidate.symbol, candidate.lane)] = (
             frame.received_at_ms,
             candidate.setup_id,
@@ -1429,7 +1472,6 @@ class StrategyV2Evaluator:
             valid_until_ms=frame.received_at_ms + self.entry_ttl_ms,
             cooldown_until_ms=frame.received_at_ms + self.cooldown_ms,
         )
-        features = dict(candidate.features)
         features.update(
             {
                 "best_bid": frame.best_bid,

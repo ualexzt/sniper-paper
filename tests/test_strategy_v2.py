@@ -15,6 +15,7 @@ from sniper_paper.strategy_v2 import (
     OrderflowFrame,
     StrategyV2Evaluator,
     _cascade_geometry,
+    _LaneCandidate,
     _nearest_target,
 )
 
@@ -89,6 +90,44 @@ def mirror_frame(frame: OrderflowFrame) -> OrderflowFrame:
 
 def decision(decisions: list, lane: str):
     return next(item for item in decisions if item.lane == lane)
+
+
+def trigger_candidate(side: Side, risk_bp: float, lane: str = "test_lane") -> _LaneCandidate:
+    entry = 100.0 if side is Side.LONG else 100.1
+    stop = entry * (1 - risk_bp / 10_000) if side is Side.LONG else entry * (1 + risk_bp / 10_000)
+    target = 101.0 if side is Side.LONG else 99.0
+    return _LaneCandidate(
+        setup_id=f"{lane}-{side.value}-{risk_bp}", lane=lane, symbol="XUSDT", side=side,
+        trigger_now=True, armed_at_ms=1, expires_at_ms=2, target_level=None,
+        target_price=target, stop_price=stop, invalidation_price=stop,
+        reference_price=None, sweep_extreme_price=None, score=1.0, features={},
+    )
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+@pytest.mark.parametrize("risk_bp", [10.0, 50.0])
+def test_trigger_accepts_inclusive_risk_boundaries(side: Side, risk_bp: float) -> None:
+    frame = OrderflowFrame("XUSDT", 1, 100.0, 10.0, 100.1, 10.0, 0, 1, 1, 1, 2_000, 2_000, 1, 1, 1)
+    result = StrategyV2Evaluator()._trigger(trigger_candidate(side, risk_bp), frame)
+    assert result.status == DecisionStatus.TRIGGERED.value
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+def test_trigger_rejects_risk_outside_bounds_for_all_executable_lane_shapes(side: Side) -> None:
+    frame = OrderflowFrame("XUSDT", 1, 100.0, 10.0, 100.1, 10.0, 0, 1, 1, 1, 2_000, 2_000, 1, 1, 1)
+    for lane in (LaneName.CASCADE_IMPULSE.value, LaneName.FRESH_EXTREME_MOMENTUM.value, LaneName.STRUCTURAL_REACTION.value):
+        result = StrategyV2Evaluator()._trigger(trigger_candidate(side, 50.01, lane), frame)
+        assert result.status == DecisionStatus.REJECTED.value
+        assert result.reason == "risk_out_of_bounds"
+
+
+def test_trigger_rejects_live_ena_inverted_short_bracket() -> None:
+    frame = OrderflowFrame("ENAUSDT", 1, 0.15060, 10.0, 0.15062, 10.0, 0, 1, 1, 1, 2_000, 2_000, 1, 1, 1)
+    candidate = trigger_candidate(Side.SHORT, 20.0, "cascade_impulse")
+    candidate = candidate.__class__(**{**candidate.__dict__, "symbol": "ENAUSDT", "stop_price": 0.15061527, "target_price": 0.14622})
+    result = StrategyV2Evaluator()._trigger(candidate, frame)
+    assert result.status == DecisionStatus.REJECTED.value
+    assert result.reason == "invalid_signal_bracket"
 
 
 def build_failed_sweep_fixture():

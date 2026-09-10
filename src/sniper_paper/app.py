@@ -935,6 +935,25 @@ class PaperApp:
         }
         self.journal.record_signal(row)
         if signal:
+            quote = self._quote(state, now_ms)
+            bracket_reason = self._signal_bracket_reason(
+                signal,
+                path_entry=price,
+                executable_entry=quote.bid if signal.side is PaperSide.LONG else quote.ask,
+            )
+            if bracket_reason is not None:
+                # A malformed strategy signal is a rejected record, not a
+                # stream error.  In particular, do not start a path whose
+                # geometry cannot be evaluated and do not call the executor.
+                self.journal.update_signal_status(signal.signal_id, "REJECTED", bracket_reason)
+                self.journal.event(
+                    now_ms,
+                    "WARN",
+                    "SIGNAL_REJECTED",
+                    bracket_reason,
+                    {"symbol": state.symbol, "signal_id": signal.signal_id, "lane": signal.lane},
+                )
+                return
             self._start_signal_path(state, signal, price, now_ms)
             blocker = self.executor.submission_blocker(signal)
             if blocker:
@@ -942,12 +961,28 @@ class PaperApp:
             else:
                 submitted = self.executor.submit(
                     signal,
-                    self._quote(state, now_ms),
+                    quote,
                     qty_step=state.qty_step,
                     min_order_qty=state.min_order_qty,
                 )
                 if not submitted:
                     self.journal.update_signal_status(signal.signal_id, "MISSED", "post_only_submission_rejected")
+
+    @staticmethod
+    def _signal_bracket_reason(
+        signal: PaperSignal,
+        *,
+        path_entry: float,
+        executable_entry: float,
+    ) -> str | None:
+        prices = (path_entry, executable_entry, signal.stop_price, signal.target_price)
+        if not all(math.isfinite(value) and value > 0 for value in prices):
+            return "invalid_signal_bracket"
+        if signal.side is PaperSide.LONG:
+            valid = signal.stop_price < path_entry < signal.target_price and signal.stop_price < executable_entry < signal.target_price
+        else:
+            valid = signal.target_price < path_entry < signal.stop_price and signal.target_price < executable_entry < signal.stop_price
+        return None if valid else "invalid_signal_bracket"
 
     def _start_signal_path(
         self,
