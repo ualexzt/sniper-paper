@@ -108,24 +108,28 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
-- Deployed code commit: `2ed84c5`.
-- Deployed at: 2026-09-10 12:18 UTC.
+- Deployed code commit: `2c73c24`.
+- Deployed at: 2026-09-10 13:46 UTC.
+- Protocol v2.7.0 and level version
+  `digash_horizontal_levels_v3_touch_episodes` are active. The first rebuild
+  produced 2,058 versioned level rows, including 476 active rows; the dashboard
+  continues to return only its nearest presentation set and groups exact-price
+  cross-TF duplicates without changing the trading catalogue.
 - Dashboard-only follow-up: the right workspace now stays within the viewport,
   the paper-trading panel is pinned to the bottom, and the chart consumes the
   remaining height. Retired readiness, verified-metrics, active-level-list and
   orderflow blocks were removed from the operator UI; level rays remain on the
   chart and research diagnostics remain available through the read-only API.
 - Pre-release database backup:
-  `runtime/paper.db.pre-v2.5.2-20260910T071523Z` (`integrity_check=ok`).
+  `runtime/paper.db.pre-v2.7.0-20260910T134505Z` (`integrity_check=ok`, schema 6).
+  A separate v2.7.0 migration-test copy also passed integrity and schema checks.
 - Post-deploy checks: container healthy, restart count 0, OOM false,
   WebSocket connected, 10/10 books ready, HTTP health 200, SQLite
-  `integrity_check=ok`, schema version 5. The deployed image reports protocol
-  v2.5.2 and the expected strategy/execution version labels.
-- Five post-start heartbeats covered 120 seconds. There were no new BOOK,
-  STREAM_DISCONNECTED, or SIGNAL_REJECTED events and no new positions during
-  that short check. Historical UNI dust rows are preserved and exposed by the
-  API with `numerical_dust`; the dashboard omits them from trade history.
-- Local Ruff, 171 tests, a fresh Docker build and image smoke test passed.
+  `integrity_check=ok`, schema version 6. The existing PONSUSDT SHORT position
+  restored with the same position ID and bracket. After the initial 0/10
+  startup heartbeat, three subsequent heartbeats showed 10/10 books and no
+  restart/disconnect event.
+- Local Ruff, 183 tests, a fresh Docker build and image smoke test passed.
 - The 2026-09-10 session is intentionally `partial_day_observation_only`
   because the protocol changed mid-day. Forward evaluation can become eligible
   only after the 2026-09-11 UTC selection and warmup.
