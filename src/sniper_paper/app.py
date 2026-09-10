@@ -23,6 +23,7 @@ from .metrics import MetricResult, btc_correlation, dollar_volume, natr_5m_14, s
 from .orderflow import DomTracker, Footprint
 from .paper import PaperExecutor, PaperSignal, Quote
 from .paper import Side as PaperSide
+from .profit_protection import ProfitProtection, ProfitProtectionConfig
 from .shadow_levels import GeometryConfig, build_reference_levels
 from .shadow_orderflow import DensityWallEvidence, ShadowOrderflowEvaluator, ShadowStatus
 from .shadow_setups import RetestReclaimShadowEvaluator, ShadowSetupStatus
@@ -129,6 +130,15 @@ class PaperApp:
             latency_ms=int(params["paper"]["latency_ms"]),
             entry_ttl_ms=int(self.protocol_data["execution_policy"]["entry_ttl_ms"]),
         )
+        pp = params.get("profit_protection", {})
+        self.profit_protection_config = ProfitProtectionConfig(
+            enabled=bool(pp.get("enabled", True)), activation_r=float(pp.get("activation_r", 1.0)),
+            giveback_r=float(pp.get("giveback_r", 0.5)), min_floor_r=float(pp.get("min_floor_r", 0.0)),
+            delta_min_notional=float(pp.get("delta_min_notional", 0.0)),
+            delta_multiplier=float(pp.get("delta_multiplier", 2.0)),
+            delta_baseline_count=int(pp.get("delta_baseline_count", 5)),
+        )
+        self.profit_protection: ProfitProtection | None = None
         self.executor.restore()
         self.max_book_age_ms = int(params["data_quality"]["max_book_age_ms"])
         self.warmup_ms = int(params["data_quality"]["warmup_minutes_after_snapshot"]) * 60_000
@@ -452,7 +462,15 @@ class PaperApp:
                     dom_events = self.dom.process(wrapped)
                     self._update_density_walls(state, dom_events)
                     state.last_dom_events = [*state.last_dom_events, *dom_events][-20:]
-                self.executor.on_quote(symbol, self._quote(state, received_at_ms))
+                quote = self._quote(state, received_at_ms)
+                # Observe the closing quote before baseline execution mutates
+                # executor.position; this preserves shadow continuity.
+                self._observe_profit_protection(quote)
+                execution = self.executor.on_quote(symbol, quote)
+                if execution and execution.get("event") == "CLOSE" and self.profit_protection is not None:
+                    for event in self.profit_protection.on_baseline_close(dict(execution)):
+                        self.journal.record_profit_shadow_event(event, self.protocol_hash)
+                    self.profit_protection = None
                 for footprint in completed_footprints:
                     self._complete_footprint(footprint, received_at_ms)
             except (TypeError, ValueError) as exc:
@@ -551,6 +569,28 @@ class PaperApp:
             }
             return
         self._evaluate_v2(state, footprint, evaluated_at_ms or bar.closed_at_ms)
+
+        if self.profit_protection is not None and state.book.ready:
+            quote = self._quote(state, evaluated_at_ms or bar.closed_at_ms)
+            for event in self.profit_protection.on_footprint(footprint, quote):
+                self.journal.record_profit_shadow_event(event, self.protocol_hash)
+
+    def _observe_profit_protection(self, quote: Quote) -> None:
+        position = getattr(self.executor, "position", None)
+        if position is None:
+            self.profit_protection = None
+            return
+        if self.profit_protection is None or self.profit_protection.position_id != position.position_id:
+            self.profit_protection = ProfitProtection(
+                position, taker_fee_rate=self.executor.taker_fee_rate,
+                slippage_bp=self.executor.slippage_bp, config=self.profit_protection_config,
+                terminal_modes={row["mode"] for row in self.journal.profit_shadow_history(position_id=position.position_id, protocol_hash=self.protocol_hash)
+                                if row["decision"] == "SHADOW_EXIT"},
+            )
+        else:
+            self.profit_protection.sync_position(position)
+        for event in self.profit_protection.on_quote(quote):
+            self.journal.record_profit_shadow_event(event, self.protocol_hash)
 
     def _readiness(self, state: SymbolState, now_ms: int) -> dict[str, Any]:
         warmup_remaining = (
@@ -1215,6 +1255,7 @@ class PaperApp:
         shadow_diagnostics = self.journal.shadow_diagnostics(symbol, limit=50, protocol_hash=self.protocol_hash)
         for item in shadow_diagnostics:
             item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
+        profit_shadow = self.journal.profit_shadow_history(limit=50, symbol=symbol)
         signal_paths = self.journal.signal_path_events_for_symbol(symbol, limit=50)
         for item in signal_paths:
             item["occurred_at"] = _stamp(int(item["occurred_at_ms"]))
@@ -1244,6 +1285,7 @@ class PaperApp:
             "open_orders": open_orders,
             "history": history,
             "shadow_diagnostics": shadow_diagnostics,
+            "profit_shadow": profit_shadow,
             "signal_paths": signal_paths,
             "readiness": self._readiness(state, now_ms),
             "orderflow": state.last_orderflow,

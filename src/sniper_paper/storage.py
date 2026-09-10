@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class Journal:
@@ -241,6 +241,18 @@ class Journal:
                     features_json TEXT NOT NULL,
                     provenance_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS profit_shadow_events (
+                    event_id TEXT PRIMARY KEY,
+                    position_id TEXT NOT NULL,
+                    occurred_at_ms INTEGER NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('price_only', 'price_plus_orderflow')),
+                    decision TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    protocol_hash TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_profit_shadow_position_time
+                    ON profit_shadow_events(position_id, occurred_at_ms DESC);
                 CREATE INDEX IF NOT EXISTS idx_signal_path_signal_time
                     ON signal_path_events(signal_id, occurred_at_ms, event_id);
                 """
@@ -446,6 +458,45 @@ class Journal:
                    VALUES (?, ?, ?, ?, ?)""",
                 (occurred_at_ms, severity, kind, message, _json(details or {})),
             )
+
+    def record_profit_shadow_event(self, event: Mapping[str, Any], protocol_hash: str) -> None:
+        """Persist an auditable, idempotent counterfactual decision."""
+        import hashlib
+        event_id = str(event.get("event_id") or hashlib.sha256(
+            f"{protocol_hash}|{event['position_id']}|{event['occurred_at_ms']}|{event['mode']}|{event['decision']}|{event.get('bucket_end_ms','')}".encode()
+        ).hexdigest()[:32])
+        with self.connect() as db:
+            db.execute(
+                """INSERT OR IGNORE INTO profit_shadow_events
+                   (event_id, position_id, occurred_at_ms, mode, decision, reason, protocol_hash, data_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, str(event["position_id"]), int(event["occurred_at_ms"]), str(event["mode"]),
+                 str(event["decision"]), str(event["reason"]), protocol_hash, _json(dict(event))),
+            )
+
+    def profit_shadow_history(self, position_id: str | None = None, limit: int = 100, symbol: str | None = None, protocol_hash: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            clauses, values = [], []
+            if position_id is not None:
+                clauses.append("pse.position_id=?")
+                values.append(position_id)
+            if symbol is not None:
+                clauses.append("p.symbol=?")
+                values.append(symbol)
+            if protocol_hash is not None:
+                clauses.append("pse.protocol_hash=?")
+                values.append(protocol_hash)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            values.append(limit)
+            rows = db.execute("""SELECT pse.*, p.symbol FROM profit_shadow_events pse
+                LEFT JOIN positions p ON p.position_id=pse.position_id""" + where +
+                " ORDER BY pse.occurred_at_ms DESC LIMIT ?", values).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["data"] = json.loads(item.pop("data_json"))
+            result.append(item)
+        return result
 
     def record_shadow_diagnostic(self, diagnostic: Mapping[str, Any]) -> bool:
         """Persist one idempotent observation with no paper-execution linkage."""

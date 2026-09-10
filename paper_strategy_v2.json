@@ -1,12 +1,13 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.5.2",
+  "version": "v2.6.0",
   "status": "frozen_spec",
   "versions": {
     "strategy": "v2.5.2-uniform-risk-brackets",
     "level": "digash_horizontal_levels_v2",
     "universe": "daily_universe_v2_shadow_metrics",
     "execution": "paper_execution_v2_dust_guard",
+    "profit_protection": "paper_profit_protection_shadow_v2",
     "source_data_contract": "bybit_public_market_data_v2_complete_buckets"
   },
   "session_policy": {
@@ -74,6 +75,12 @@
     "execution_link_allowed": false,
     "restart_without_tick_buffer": "UNKNOWN",
     "same_bar_without_trade_order": "AMBIGUOUS"
+  },
+  "profit_protection_policy": {
+    "version": "paper_profit_protection_shadow_v2",
+    "execution_link_allowed": false,
+    "net_executable_pnl": true,
+    "floor_is_monotonic": true
   },
   "execution_policy": {
     "mode": "paper",
@@ -143,6 +150,15 @@
       "taker_fee_rate": 0.00055,
       "slippage_bp": 2.0,
       "latency_ms": 250
+    },
+    "profit_protection": {
+      "enabled": true,
+      "activation_r": 1.0,
+      "giveback_r": 0.5,
+      "min_floor_r": 0.0,
+      "delta_min_notional": 100.0,
+      "delta_multiplier": 2.0,
+      "delta_baseline_count": 5
     }
   },
   "lanes": [

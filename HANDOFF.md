@@ -10,6 +10,11 @@ Last updated: 2026-09-10 (Europe/Kyiv)
 - Remote checkout: `/home/ubuntu/sniper-paper`.
 - Dashboard: loopback-only port `8080` (use an SSH tunnel).
 
+## Unreleased v2.6.0
+
+- Adds paper-only `paper_profit_protection_shadow_v2` counterfactual exits.
+- Thresholds are hypotheses; baseline fixed SL/TP and execution are unchanged.
+
 ## Release v2.5.2
 
 - Every triggered v2 lane validates positive finite SL/entry/TP and the
