@@ -131,6 +131,30 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
+- Deployed code commit: `6105779`, protocol v2.8.1, 2026-09-11 19:04 UTC.
+- Fixes four audited defects: deferred evaluation when a boundary footprint
+  arrives before its completed 1m candle; current quote must remain beyond the
+  breakout level; sweep confirmation must close back across the reference;
+  pending sweeps revalidate their reference against the current level catalogue.
+- Deferred evaluation runs after trade-batch execution and is cleared on newer
+  footprints, disconnects and snapshots. Existing entry TTL and readiness gates
+  still apply. No schema migration or level detector change.
+- Protocol hash:
+  `7bb753473b5198d8d5de71140ad5b316336fd3c9ad07ede72b6d78c90d546ffe`.
+- Local Ruff, 212 tests (12 new regression cases), Docker build and image
+  initialization smoke test passed. Consistent SQLite backup
+  `runtime/paper.db.pre-v2.8.1-20260911T190340Z` passed `quick_check=ok`.
+- Post-deploy: healthy container, restart count 0, OOM false, health HTTP 200,
+  WebSocket connected, heartbeat books 8/8, schema 7 and new strategy version
+  verified. Startup briefly returned HTTP 503 before books became ready.
+- No position was open at restart. The September 11 session remains
+  observation-only; eligibility requires the next complete UTC selection and
+  warmup. New entry behavior is regression-tested, not yet forward-validated.
+- The cheap coding agent exhausted its usage allocation before making code
+  changes; the primary agent completed and checked this narrow patch.
+
+## Previous deployment v2.8.0
+
 - Deployed code commit: `c72ea1b`.
 - Deployed at: 2026-09-11 14:42 UTC.
 - Protocol v2.8.0 is active with hash
