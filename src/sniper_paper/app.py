@@ -78,6 +78,7 @@ class SymbolState:
     shadow_active: bool = False
     last_blocker: str | None = None
     orderflow_ready: bool = False
+    boundary_footprint: dict[str, Any] | None = None
     recorded_decisions: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
@@ -433,6 +434,7 @@ class PaperApp:
                         builder.quarantine_first_bucket()
                     symbol_state.last_blocker = "stream_disconnected"
                     symbol_state.orderflow_ready = False
+                    symbol_state.boundary_footprint = None
                     symbol_state.density_walls.clear()
                     symbol_state.shadow_active = False
                 self.executor.cancel_pending("market_stream_disconnected", received_at_ms)
@@ -456,6 +458,7 @@ class PaperApp:
                 state.book.apply(message, received_at_ms)
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
                     state.snapshot_received_at_ms = received_at_ms
+                    state.boundary_footprint = None
                     state.density_walls.clear()
                     state.shadow_active = False
                 wrapped = {"received_at_ms": received_at_ms, "connection_id": self.connection_id, "message": message}
@@ -500,6 +503,16 @@ class PaperApp:
                 )
                 if execution and execution.get("event") in {"OPEN", "PARTIAL"}:
                     self.journal.event(received_at_ms, "INFO", "PAPER_FILL", str(execution["event"]), execution)
+            # A book message can flush the boundary footprint before the first
+            # trade closes its 1m candle. Retry only after this batch's execution,
+            # so a signal cannot fill against the trade that made it observable.
+            symbol = topic.rsplit(".", 1)[-1]
+            state = self.states.get(symbol)
+            deferred = state.boundary_footprint if state is not None else None
+            if (deferred is not None and state.bars["1m"]
+                    and state.bars["1m"][-1].closed_at_ms >= int(deferred["bucket_end_ms"])):
+                state.boundary_footprint = None
+                self._evaluate_v2(state, deferred, received_at_ms)
             for footprint in completed_footprints:
                 self._complete_footprint(footprint, received_at_ms)
 
@@ -561,6 +574,7 @@ class PaperApp:
         if state.bars["15s"] and bar.opened_at_ms <= state.bars["15s"][-1].opened_at_ms:
             return
         state.bars["15s"].append(bar)
+        state.boundary_footprint = None
         state.bars["15s"] = state.bars["15s"][-BAR_RETENTION:]
         state.history_diagnostics["15s"] = _history_diagnostics("15s", state.bars["15s"], HISTORY_LIMIT)
         self.journal.record_bar("15s", bar, "public_trade_footprint")
@@ -573,7 +587,15 @@ class PaperApp:
                 "status": "incomplete",
             }
             return
-        self._evaluate_v2(state, footprint, evaluated_at_ms or bar.closed_at_ms)
+        # Keep the latest boundary block until the matching 1m candle exists.
+        # Newer footprints supersede it; the evaluator still enforces entry TTL.
+        state.boundary_footprint = None
+        if bar.closed_at_ms % 60_000 == 0 and (
+            not state.bars["1m"] or state.bars["1m"][-1].closed_at_ms < bar.closed_at_ms
+        ):
+            state.boundary_footprint = footprint
+        else:
+            self._evaluate_v2(state, footprint, evaluated_at_ms or bar.closed_at_ms)
 
         if self.profit_protection is not None and state.book.ready:
             quote = self._quote(state, evaluated_at_ms or bar.closed_at_ms)

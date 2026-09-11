@@ -476,6 +476,19 @@ class StrategyV2Evaluator:
         if len(bars_15s) < 21 or len(bars_1m) < 15:
             return self._reject(lane=lane, reason="warmup", side=None, features={})
 
+        for side in (Side.LONG, Side.SHORT):
+            key = _setup_key(symbol, lane, side)
+            pending = self._pending.get(key)
+            if pending is not None:
+                reference = next((level for level in levels if pending.target_level is not None
+                                  and level.level_id == pending.target_level.level_id), None)
+                if reference is None or not level_active_at(reference, now_ms):
+                    self._pending.pop(key, None)
+                    self._attempted.add(pending.setup_id)
+                    return self._miss(lane=lane, reason="reference_level_invalidated", side=side,
+                                      setup_id=pending.setup_id, features=pending.features)
+                pending.target_level = reference
+
         candidates = [candidate for candidate in (self._failed_sweep_candidate(symbol, now_ms, bars_15s, bars_1m, levels, frame, side)
                                                   for side in (Side.LONG, Side.SHORT)) if candidate is not None]
         if candidates:
@@ -674,6 +687,8 @@ class StrategyV2Evaluator:
         if frozen_delta_baseline <= 0:
             return None
         if pending.side is Side.LONG:
+            if latest.close <= pending.reference_price:
+                return None
             if min(bar.low for bar in post_armed) < pending.sweep_extreme_price:
                 return None
             if frame.delta_notional < frozen_delta_baseline:
@@ -687,6 +702,8 @@ class StrategyV2Evaluator:
             if frame.top5_bid_notional < self.min_depth_notional_top5:
                 return None
         else:
+            if latest.close >= pending.reference_price:
+                return None
             if max(bar.high for bar in post_armed) > pending.sweep_extreme_price:
                 return None
             if frame.delta_notional > -frozen_delta_baseline:
@@ -1555,6 +1572,13 @@ class StrategyV2Evaluator:
                 setup_id=candidate.setup_id,
                 features=candidate.features,
             )
+        if candidate.lane == LaneName.TERMINAL_LEVEL_BREAKOUT.value and (
+            (candidate.side is Side.LONG and frame.best_bid <= reference.price)
+            or (candidate.side is Side.SHORT and frame.best_ask >= reference.price)
+        ):
+            return self._reject(lane=candidate.lane, reason="price_returned_through_reference",
+                                side=candidate.side, target_level=reference,
+                                setup_id=candidate.setup_id, features=candidate.features)
         # Every executable lane passes this final, side-aware gate.  Individual
         # setup builders may use different stop geometry, but admission must
         # always be measured from the executable top of book.

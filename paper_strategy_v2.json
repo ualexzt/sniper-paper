@@ -1,9 +1,9 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.8.0",
+  "version": "v2.8.1",
   "status": "frozen_spec",
   "versions": {
-    "strategy": "v2.6.0-level-reaction-only",
+    "strategy": "v2.6.1-level-reaction-causal-guards",
     "level": "digash_horizontal_levels_v3_touch_episodes",
     "universe": "daily_universe_v2_shadow_metrics",
     "execution": "paper_execution_v2_dust_guard_relative_epsilon",
@@ -59,6 +59,10 @@
     "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
     "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
     "orderflow_required": true,
+    "breakout_current_quote_must_remain_beyond_level": true,
+    "sweep_confirmation_close_must_reclaim_level": true,
+    "pending_reference_revalidated_at_confirmation": true,
+    "minute_completion_retries_boundary_footprint": true,
     "non_reaction_lanes": "diagnostic_only"
   },
   "shadow_diagnostics_policy": {

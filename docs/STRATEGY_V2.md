@@ -1,6 +1,6 @@
 # Strategy V2
 
-Frozen protocol version: v2.8.0, dated 2026-09-11. It retains one canonical
+Frozen protocol version: v2.8.1, dated 2026-09-11. It retains one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
 The executable scope is now restricted to direct level reactions; numerical
@@ -12,14 +12,14 @@ strategy thresholds remain hypotheses and are unchanged.
 paper order, and evaluation session must be attributable to these immutable
 identifiers:
 
-- `strategy`: `v2.6.0-level-reaction-only`, direct level-reaction execution scope;
+- `strategy`: `v2.6.1-level-reaction-causal-guards`, direct level-reaction execution scope;
 - `level`: the causal level lifecycle and geometry contract;
 - `universe`: `daily_universe_v2_shadow_metrics`, the once-daily UTC selector
   contract with recorded $50k liquidity diagnostics;
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.8.0` because executable strategy scope
+The top-level protocol version is `v2.8.1` because executable strategy scope
 changed to direct level reactions while target eligibility, level lifecycle
 persistence, and the recorded metric/coverage contract remain causal. The
 metric and liquidity observations do not participate in trade eligibility.

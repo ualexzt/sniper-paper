@@ -20,6 +20,36 @@ from sniper_paper.strategy import Level, LevelSide
 from sniper_paper.strategy_v2 import DecisionStatus, StrategyDecision, StrategySignal
 
 
+@pytest.mark.parametrize("book_first", [True, False])
+def test_boundary_footprint_evaluated_once_after_trade_execution(tmp_path, monkeypatch, book_first):
+    from types import SimpleNamespace
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    app.states = {state.symbol: state}
+    state.builders["1m"].add(Trade("XUSDT", 1_000, "seed", 100, 1, "Buy"))
+    footprint = {"symbol": "XUSDT", "bucket_start_ms": 45_000, "bucket_end_ms": 60_000,
+                 "open": 100, "high": 101, "low": 100, "close": 101, "volume": 1,
+                 "delta_notional": 100, "trades": 1}
+    events = []
+    monkeypatch.setattr(app, "_refresh_digash_levels", lambda *args: None)
+    monkeypatch.setattr(app, "_refresh_level_lifecycle", lambda *args: None)
+    monkeypatch.setattr(app.executor, "on_trade", lambda *args: events.append("trade"))
+    def evaluate(s, fp, now):
+        assert s.bars["1m"][-1].closed_at_ms == 60_000
+        assert s.bars["15s"][-1].closed_at_ms == 60_000
+        events.append("evaluate")
+    monkeypatch.setattr(app, "_evaluate_v2", evaluate)
+    if book_first:
+        app._complete_footprint(footprint, 60_001)
+        assert events == []
+    app.footprint = SimpleNamespace(process=lambda row: [] if book_first else [footprint])
+    message = {"topic": "publicTrade.XUSDT", "data": [
+        {"s": "XUSDT", "i": "new", "p": "101", "v": "1", "S": "Buy"}]}
+    asyncio.run(app.handle_message(message, 60_002))
+    assert events == ["trade", "evaluate"]
+    assert state.boundary_footprint is None
+
+
 def test_parse_klines_orders_oldest_first_and_excludes_forming() -> None:
     rows = [
         [120_000, "3", "4", "2", "3.5", "5", "17"],

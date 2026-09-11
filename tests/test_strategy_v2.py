@@ -22,6 +22,50 @@ from sniper_paper.strategy_v2 import (
 CENTER = 100.0
 
 
+@pytest.mark.parametrize("mirror", [False, True])
+@pytest.mark.parametrize("failure", ["close", "broken", "missing", "none"])
+def test_sweep_revalidates_confirmation_and_current_catalog(mirror, failure):
+    f = build_failed_sweep_fixture()
+    bars, levels = f["bars"], f["levels"]
+    arm, confirm = f["arm_frame"], f["confirm_frame"]
+    if failure == "close":
+        bars["15s"][-1] = replace(bars["15s"][-1], low=99.9, close=99.95)
+    if mirror:
+        bars = {tf: [mirror_bar(b) for b in rows] for tf, rows in bars.items()}
+        levels = [mirror_level(x) for x in levels]
+        arm, confirm = mirror_frame(arm), mirror_frame(confirm)
+    evaluator = StrategyV2Evaluator()
+    evaluator.evaluate(symbol="XUSDT", now_ms=f["arm_now"],
+                       bars={"1m": bars["1m"], "15s": bars["15s"][:-1]},
+                       levels=levels, orderflow=arm)
+    if failure == "broken":
+        levels = [replace(x, broken_at_ms=920_000) for x in levels]
+    elif failure == "missing":
+        levels = []
+    result = evaluator.evaluate(symbol="XUSDT", now_ms=f["confirm_now"],
+                                bars=bars, levels=levels, orderflow=confirm)[0]
+    assert (result.signal is not None) == (failure == "none")
+    if failure in {"broken", "missing"}:
+        assert result.reason == "reference_level_invalidated"
+
+
+@pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
+def test_breakout_current_quote_must_stay_beyond_reference(side):
+    f = build_failed_sweep_fixture()
+    frame = f["confirm_frame"]
+    level = Level("ref", "XUSDT", "1m", LevelSide.HIGH, 100.3, 0)
+    stop, target = 99.9, 101.0
+    if side is Side.SHORT:
+        frame, level = mirror_frame(frame), mirror_level(level)
+        stop, target = mirror_price(stop), mirror_price(target)
+    candidate = _LaneCandidate("test", LaneName.TERMINAL_LEVEL_BREAKOUT.value,
+        "XUSDT", side, True, frame.received_at_ms, frame.received_at_ms + 2000,
+        level, target, stop, level.price, None, None, 1.0, {})
+    result = StrategyV2Evaluator()._trigger(candidate, frame)
+    assert result.signal is None
+    assert result.reason == "price_returned_through_reference"
+
+
 def test_frozen_v2_protocol_matches_evaluator_lanes_and_safety_boundary() -> None:
     payload = json.loads((Path(__file__).parents[1] / "paper_strategy_v2.json").read_text())
     assert {row["name"] for row in payload["lanes"]} == {lane.value for lane in LaneName}
@@ -107,7 +151,8 @@ def trigger_candidate(side: Side, risk_bp: float, lane: str = LaneName.TERMINAL_
     return _LaneCandidate(
         setup_id=f"{lane}-{side.value}-{risk_bp}", lane=lane, symbol="XUSDT", side=side,
         trigger_now=True, armed_at_ms=1, expires_at_ms=2,
-        target_level=Level("reference", "XUSDT", "1m", LevelSide.HIGH, 100.5, 0),
+        target_level=Level("reference", "XUSDT", "1m", LevelSide.HIGH,
+                           99.99 if side is Side.LONG else 100.11, 0),
         target_price=target, stop_price=stop, invalidation_price=stop,
         reference_price=None, sweep_extreme_price=None, score=1.0, features={},
     )
