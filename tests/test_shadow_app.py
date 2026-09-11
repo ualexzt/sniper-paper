@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sniper_paper.app import PaperApp, SymbolState
 from sniper_paper.market import Bar
+from sniper_paper.paper import OpenPaperPosition, PaperSignal, Quote
 from sniper_paper.paper import Side as PaperSide
 from sniper_paper.shadow_orderflow import ShadowOrderflowEvaluator
 from sniper_paper.shadow_setups import (
@@ -50,6 +51,18 @@ class _FakeRetestEvaluator:
 
 def _app(tmp_path: Path) -> PaperApp:
     return PaperApp(Journal(tmp_path / "paper.db"))
+
+
+def test_profit_protection_routing_ignores_other_symbol(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    signal = PaperSignal("pp", 0, "BTCUSDT", PaperSide.LONG, "lane", 99.0, 105.0)
+    app.executor.position = OpenPaperPosition("position", signal, 0, 100.0, 1.0, 0.0)
+    app._observe_profit_protection("BTCUSDT", Quote(1, 101.0, 101.1, symbol="BTCUSDT"))
+    guard = app.profit_protection
+    assert guard is not None
+    before = (guard.last_executable, guard.high_water_net, guard.last_bucket_closed_at_ms)
+    app._observe_profit_protection("ETHUSDT", Quote(2, 10_000.0, 10_001.0, symbol="ETHUSDT"))
+    assert (guard.last_executable, guard.high_water_net, guard.last_bucket_closed_at_ms) == before
 
 
 def test_update_density_walls_snapshot_lifecycle(tmp_path: Path) -> None:

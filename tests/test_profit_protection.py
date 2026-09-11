@@ -40,6 +40,18 @@ def test_orderflow_requires_complete_adverse_delta_and_price_loss() -> None:
     assert guard.on_footprint({**row, "bucket_end_ms": 30_000, "incomplete": True}, quote) == []
 
 
+def test_profit_protection_rejects_other_symbol_quote_and_footprint() -> None:
+    guard = ProfitProtection(_position(), taker_fee_rate=0.00055, slippage_bp=2.0,
+                             config=ProfitProtectionConfig(activation_r=1.0, giveback_r=0.5))
+    other_quote = Quote(3, 101.2, 101.3, symbol="ETHUSDT")
+    assert guard.on_quote(other_quote) == []
+    assert guard.on_footprint(
+        {"symbol": "ETHUSDT", "bucket_end_ms": 15_000, "delta_notional": -100.0,
+         "feed_readiness": {"ready": True}},
+        Quote(4, 100.5, 100.6, symbol="ETHUSDT"),
+    ) == []
+
+
 def test_shadow_events_are_auditable_and_idempotent(tmp_path) -> None:
     journal = Journal(tmp_path / "paper.db")
     event = {"position_id": "p1", "occurred_at_ms": 10, "mode": "price_only",

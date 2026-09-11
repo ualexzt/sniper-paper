@@ -1,9 +1,10 @@
 # Strategy V2
 
-Frozen protocol version: v2.5.1, dated 2026-09-09. It introduces one canonical
+Frozen protocol version: v2.8.0, dated 2026-09-11. It retains one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
-Numerical strategy thresholds are unchanged.
+The executable scope is now restricted to direct level reactions; numerical
+strategy thresholds remain hypotheses and are unchanged.
 
 ## Immutable provenance and sessions
 
@@ -11,15 +12,16 @@ Numerical strategy thresholds are unchanged.
 paper order, and evaluation session must be attributable to these immutable
 identifiers:
 
-- `strategy`: `v2.3.0`, the canonical-target lane behavior with unchanged thresholds;
+- `strategy`: `v2.6.0-level-reaction-only`, direct level-reaction execution scope;
 - `level`: the causal level lifecycle and geometry contract;
 - `universe`: `daily_universe_v2_shadow_metrics`, the once-daily UTC selector
   contract with recorded $50k liquidity diagnostics;
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.5.1` because target eligibility, level
-lifecycle persistence, and the recorded metric/coverage contract changed. The
+The top-level protocol version is `v2.8.0` because executable strategy scope
+changed to direct level reactions while target eligibility, level lifecycle
+persistence, and the recorded metric/coverage contract remain causal. The
 metric and liquidity observations do not participate in trade eligibility.
 The `session_policy` binds a
 session to `{utc_date}:{protocol_sha256}` and requires a new session whenever
@@ -149,18 +151,18 @@ Anything not defined by v1 is treated as a predeclared conservative hypothesis.
 
 ## Lane Notes
 
-`failed_sweep_reclaim` is the primary lane. It arms on a causal sweep, then
-triggers only if the later confirmation bar reclaims the level without trading
-back through the sweep extreme.
+`failed_sweep_reclaim` is the primary lane. It arms only when a completed 1m
+candle pierces an active level and closes back across it. It then triggers only
+after a separate completed-15s/orderbook confirmation within 30 seconds,
+without trading back through the sweep extreme; 15s data cannot arm a sweep.
 
-`early_target_hunt` is the preparatory consolidation watcher. It can arm a
-setup but delegates the actual breakout execution to `target_seeking_breakout`.
-
-`target_seeking_breakout` is the executable breakout continuation lane for the
-same consolidation context.
-
-`terminal_level_breakout`, `structural_reaction`, `cascade_impulse`, and
-`fresh_extreme_momentum` are tradable hypotheses with conservative defaults.
+Executable entries are restricted to a direct reaction at an active horizontal
+level on completed 1m structure, with 15s/orderbook confirmation:
+`failed_sweep_reclaim` (sweep and reclaim) and `terminal_level_breakout`
+(confirmed close-through). `early_target_hunt` and `target_seeking_breakout`
+are preparation/legacy diagnostics and cannot arm or emit a paper signal.
+`structural_reaction`, `cascade_impulse`, and `fresh_extreme_momentum` remain
+shadow diagnostics only; none has an execution path.
 
 `dom_confirmed_breakout` and `diagonal_context` remain diagnostic only.
 

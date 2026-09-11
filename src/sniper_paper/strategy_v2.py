@@ -38,6 +38,16 @@ class LaneName(str, Enum):
     DIAGONAL_CONTEXT = "diagonal_context"
 
 
+# Only these lanes may ever reach the paper executor.  The remaining named
+# lanes are retained as frozen diagnostics so historical dashboards and
+# replay tooling keep their vocabulary, but they must not arm or emit a
+# StrategySignal.
+EXECUTABLE_LANES = frozenset({
+    LaneName.FAILED_SWEEP_RECLAIM.value,
+    LaneName.TERMINAL_LEVEL_BREAKOUT.value,
+})
+
+
 @dataclass(frozen=True)
 class OrderflowFrame:
     symbol: str
@@ -493,11 +503,13 @@ class StrategyV2Evaluator:
         side: Side,
     ) -> _LaneCandidate | None:
         lane = LaneName.FAILED_SWEEP_RECLAIM.value
-        latest = bars_15s[-1]
-        prev = bars_15s[-2]
-        prior_20 = bars_15s[-21:-1]
-        if len(prior_20) < 20:
+        # The level reaction is defined exclusively by completed 1m
+        # structure.  15s bars are confirmation data only and must never arm
+        # a sweep on their own.
+        if len(bars_1m) < 2:
             return None
+        latest = bars_1m[-1]
+        prev = bars_1m[-2]
         atr = _atr_1m(bars_1m)
         if atr is None or frame.median_abs_delta_20 <= 0 or frame.median_range_bp_20 <= 0:
             return None
@@ -507,12 +519,12 @@ class StrategyV2Evaluator:
                 for level in levels
                 if level.side is LevelSide.LOW
                 and level.price <= latest.close
-                and level_active_at(level, latest.opened_at_ms)
+                and level_active_at(level, latest.closed_at_ms)
             ]
             if not levels_for_side:
                 return None
             level = max(levels_for_side, key=lambda item: item.price)
-            if not (prev.close >= level.price and latest.low <= level.price - self.tick_size):
+            if not (prev.close >= level.price and latest.low <= level.price - self.tick_size and latest.close >= level.price):
                 return None
             if latest.low < level.price - atr:
                 return None
@@ -537,6 +549,11 @@ class StrategyV2Evaluator:
             invalidation = level.price - self.tick_size
             setup_id = _hash(symbol, lane, side.value, level.level_id, latest.opened_at_ms)
             features = {
+                "reaction_type": "failed_sweep_reclaim",
+                "reference_level_id": level.level_id,
+                "reference_level_timeframe": level.timeframe,
+                "reference_level_price": level.price,
+                "trigger_1m_closed_at_ms": bars_1m[-1].closed_at_ms,
                 "sweep_depth_bp": float((level.price / latest.low - 1.0) * 10_000),
                 "delta_ratio": frame.delta_ratio,
                 "range_bp": frame.range_bp,
@@ -555,7 +572,9 @@ class StrategyV2Evaluator:
                 trigger_now=False,
                 armed_at_ms=latest.closed_at_ms,
                 expires_at_ms=latest.closed_at_ms + self.confirmation_timeout_ms,
-                target_level=opposite,
+                # Keep the causal level as the candidate reference.  TP is a
+                # computed price and must not masquerade as the crossed level.
+                target_level=level,
                 target_price=target_price,
                 stop_price=stop,
                 invalidation_price=invalidation,
@@ -570,12 +589,12 @@ class StrategyV2Evaluator:
             for level in levels
             if level.side is LevelSide.HIGH
             and level.price >= latest.close
-            and level_active_at(level, latest.opened_at_ms)
+            and level_active_at(level, latest.closed_at_ms)
         ]
         if not levels_for_side:
             return None
         level = min(levels_for_side, key=lambda item: item.price)
-        if not (prev.close <= level.price and latest.high >= level.price + self.tick_size):
+        if not (prev.close <= level.price and latest.high >= level.price + self.tick_size and latest.close <= level.price):
             return None
         if latest.high > level.price + atr:
             return None
@@ -600,6 +619,11 @@ class StrategyV2Evaluator:
         invalidation = level.price + self.tick_size
         setup_id = _hash(symbol, lane, side.value, level.level_id, latest.opened_at_ms)
         features = {
+            "reaction_type": "failed_sweep_reclaim",
+            "reference_level_id": level.level_id,
+            "reference_level_timeframe": level.timeframe,
+            "reference_level_price": level.price,
+            "trigger_1m_closed_at_ms": bars_1m[-1].closed_at_ms,
             "sweep_depth_bp": float((latest.high / level.price - 1.0) * 10_000),
             "delta_ratio": frame.delta_ratio,
             "range_bp": frame.range_bp,
@@ -618,7 +642,7 @@ class StrategyV2Evaluator:
             trigger_now=False,
             armed_at_ms=latest.closed_at_ms,
             expires_at_ms=latest.closed_at_ms + self.confirmation_timeout_ms,
-            target_level=opposite,
+            target_level=level,
             target_price=target_price,
             stop_price=stop,
             invalidation_price=invalidation,
@@ -710,6 +734,12 @@ class StrategyV2Evaluator:
         bars: Mapping[str, Sequence[Bar]],
         levels: Sequence[Level],
         frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        return self._diagnostic_only(LaneName.EARLY_TARGET_HUNT.value)
+
+    def _early_target_hunt_shadow(
+        self, symbol: str, now_ms: int, bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level], frame: OrderflowFrame,
     ) -> StrategyDecision:
         lane = LaneName.EARLY_TARGET_HUNT.value
         if not self._data_quality_ok(frame):
@@ -826,6 +856,12 @@ class StrategyV2Evaluator:
         levels: Sequence[Level],
         frame: OrderflowFrame,
     ) -> StrategyDecision:
+        return self._diagnostic_only(LaneName.TARGET_SEEKING_BREAKOUT.value)
+
+    def _target_seeking_breakout_shadow(
+        self, symbol: str, now_ms: int, bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level], frame: OrderflowFrame,
+    ) -> StrategyDecision:
         lane = LaneName.TARGET_SEEKING_BREAKOUT.value
         if not self._data_quality_ok(frame):
             return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
@@ -937,10 +973,21 @@ class StrategyV2Evaluator:
         if not self._data_quality_ok(frame):
             return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
         one = bars.get("1m", ())
+        fifteen = bars.get("15s", ())
         if len(one) < 2:
+            return self._reject(lane=lane, reason="warmup", side=None, features={})
+        if not fifteen or fifteen[-1].closed_at_ms > now_ms:
             return self._reject(lane=lane, reason="warmup", side=None, features={})
         current = one[-1]
         previous = one[-2]
+        confirmation = fifteen[-1]
+        if not (current.opened_at_ms < confirmation.closed_at_ms <= current.closed_at_ms):
+            return self._reject(
+                lane=lane,
+                reason="stale_15s_confirmation",
+                side=None,
+                features={"trigger_bar_closed_at_ms": current.closed_at_ms, "confirmation_closed_at_ms": confirmation.closed_at_ms},
+            )
         if frame.received_at_ms > current.closed_at_ms + self.entry_ttl_ms:
             return self._reject(
                 lane=lane,
@@ -983,6 +1030,40 @@ class StrategyV2Evaluator:
                 side=side,
                 features={"delta_notional": frame.delta_notional, "microprice_mid_bp": frame.microprice_mid_bp},
             )
+        if (side is Side.LONG and (confirmation.close <= target_level.price or confirmation.delta_notional <= 0)) or (
+            side is Side.SHORT and (confirmation.close >= target_level.price or confirmation.delta_notional >= 0)
+        ):
+            return self._reject(
+                lane=lane,
+                reason="no_15s_confirmation",
+                side=side,
+                target_level=target_level,
+                features={"confirmation_close": confirmation.close, "confirmation_delta": confirmation.delta_notional},
+            )
+        flow_confirmed = (
+            frame.microprice > frame.mid
+            and frame.delta_notional >= frame.median_abs_delta_20
+            and frame.book_imbalance >= self.min_book_imbalance
+            and frame.top5_bid_notional >= self.min_depth_notional_top5
+            if side is Side.LONG
+            else frame.microprice < frame.mid
+            and frame.delta_notional <= -frame.median_abs_delta_20
+            and frame.book_imbalance <= -self.min_book_imbalance
+            and frame.top5_ask_notional >= self.min_depth_notional_top5
+        )
+        if not flow_confirmed:
+            return self._reject(
+                lane=lane,
+                reason="no_orderflow_confirmation",
+                side=side,
+                target_level=target_level,
+                features={
+                    "microprice_mid_bp": frame.microprice_mid_bp,
+                    "delta_notional": frame.delta_notional,
+                    "median_abs_delta_20": frame.median_abs_delta_20,
+                    "book_imbalance": frame.book_imbalance,
+                },
+            )
         stop = min(previous.low, current.low) * (1 - self.stop_buffer_bp / 10_000) if side is Side.LONG else max(previous.high, current.high) * (1 + self.stop_buffer_bp / 10_000)
         entry = frame.best_bid if side is Side.LONG else frame.best_ask
         risk_bp = _level_distance_bp(entry, stop)
@@ -1008,6 +1089,11 @@ class StrategyV2Evaluator:
             score=reward_bp / max(risk_bp, 1e-9),
             features={
                 "delta_notional": frame.delta_notional,
+                "reaction_type": "confirmed_breakout",
+                "reference_level_id": target_level.level_id,
+                "reference_level_timeframe": target_level.timeframe,
+                "reference_level_price": target_level.price,
+                "trigger_1m_closed_at_ms": current.closed_at_ms,
                 "reward_risk": self.terminal_reward_risk,
                 "risk_bp": risk_bp,
                 "target_crossed": 1.0,
@@ -1022,6 +1108,12 @@ class StrategyV2Evaluator:
         bars: Mapping[str, Sequence[Bar]],
         levels: Sequence[Level],
         frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        return self._diagnostic_only(LaneName.STRUCTURAL_REACTION.value)
+
+    def _structural_reaction_shadow(
+        self, symbol: str, now_ms: int, bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level], frame: OrderflowFrame,
     ) -> StrategyDecision:
         lane = LaneName.STRUCTURAL_REACTION.value
         if not self._data_quality_ok(frame):
@@ -1113,6 +1205,12 @@ class StrategyV2Evaluator:
         levels: Sequence[Level],
         frame: OrderflowFrame,
     ) -> StrategyDecision:
+        return self._diagnostic_only(LaneName.CASCADE_IMPULSE.value)
+
+    def _cascade_impulse_shadow(
+        self, symbol: str, now_ms: int, bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level], frame: OrderflowFrame,
+    ) -> StrategyDecision:
         lane = LaneName.CASCADE_IMPULSE.value
         if not self._data_quality_ok(frame):
             return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
@@ -1183,6 +1281,12 @@ class StrategyV2Evaluator:
         bars: Mapping[str, Sequence[Bar]],
         levels: Sequence[Level],
         frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        return self._diagnostic_only(LaneName.FRESH_EXTREME_MOMENTUM.value)
+
+    def _fresh_extreme_momentum_shadow(
+        self, symbol: str, now_ms: int, bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level], frame: OrderflowFrame,
     ) -> StrategyDecision:
         lane = LaneName.FRESH_EXTREME_MOMENTUM.value
         if not self._data_quality_ok(frame):
@@ -1413,6 +1517,44 @@ class StrategyV2Evaluator:
         return frame.book_age_ms <= self.max_book_age_ms and frame.spread_bp <= self.max_spread_bp
 
     def _trigger(self, candidate: _LaneCandidate, frame: OrderflowFrame) -> StrategyDecision:
+        if candidate.lane not in EXECUTABLE_LANES:
+            return self._reject(
+                lane=candidate.lane,
+                reason="diagnostic_only",
+                side=candidate.side,
+                target_level=candidate.target_level,
+                target_price=candidate.target_price,
+                stop_price=candidate.stop_price,
+                invalidation_price=candidate.invalidation_price,
+                setup_id=candidate.setup_id,
+                features=candidate.features,
+            )
+        if candidate.target_level is None:
+            return self._reject(
+                lane=candidate.lane,
+                reason="missing_reference_level",
+                side=candidate.side,
+                target_price=candidate.target_price,
+                stop_price=candidate.stop_price,
+                invalidation_price=candidate.invalidation_price,
+                setup_id=candidate.setup_id,
+                features=candidate.features,
+            )
+        reference = candidate.target_level
+        if reference.confirmed_at_ms > candidate.armed_at_ms or (
+            reference.broken_at_ms is not None and reference.broken_at_ms < candidate.armed_at_ms
+        ):
+            return self._reject(
+                lane=candidate.lane,
+                reason="invalid_reference_level_lifecycle",
+                side=candidate.side,
+                target_level=reference,
+                target_price=candidate.target_price,
+                stop_price=candidate.stop_price,
+                invalidation_price=candidate.invalidation_price,
+                setup_id=candidate.setup_id,
+                features=candidate.features,
+            )
         # Every executable lane passes this final, side-aware gate.  Individual
         # setup builders may use different stop geometry, but admission must
         # always be measured from the executable top of book.
@@ -1520,6 +1662,9 @@ class StrategyV2Evaluator:
             setup_id=setup_id,
             features=dict(features),
         )
+
+    def _diagnostic_only(self, lane: str) -> StrategyDecision:
+        return self._reject(lane=lane, reason="diagnostic_only", side=None, features={})
 
     def _miss(
         self,

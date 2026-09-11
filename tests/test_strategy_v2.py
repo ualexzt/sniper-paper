@@ -29,7 +29,15 @@ def test_frozen_v2_protocol_matches_evaluator_lanes_and_safety_boundary() -> Non
     assert payload["safety_boundary"]["api_keys_allowed"] is False
     assert payload["safety_boundary"]["authenticated_orders_allowed"] is False
     diagnostic = {row["name"] for row in payload["lanes"] if row["diagnostic"]}
-    assert diagnostic == {LaneName.DOM_CONFIRMED_BREAKOUT.value, LaneName.DIAGONAL_CONTEXT.value}
+    assert diagnostic == {
+        LaneName.EARLY_TARGET_HUNT.value,
+        LaneName.TARGET_SEEKING_BREAKOUT.value,
+        LaneName.STRUCTURAL_REACTION.value,
+        LaneName.CASCADE_IMPULSE.value,
+        LaneName.FRESH_EXTREME_MOMENTUM.value,
+        LaneName.DOM_CONFIRMED_BREAKOUT.value,
+        LaneName.DIAGONAL_CONTEXT.value,
+    }
 
 
 def bar(tf: int, opened: int, open_: float, high: float, low: float, close: float, delta: float = 1.0) -> Bar:
@@ -92,13 +100,14 @@ def decision(decisions: list, lane: str):
     return next(item for item in decisions if item.lane == lane)
 
 
-def trigger_candidate(side: Side, risk_bp: float, lane: str = "test_lane") -> _LaneCandidate:
+def trigger_candidate(side: Side, risk_bp: float, lane: str = LaneName.TERMINAL_LEVEL_BREAKOUT.value) -> _LaneCandidate:
     entry = 100.0 if side is Side.LONG else 100.1
     stop = entry * (1 - risk_bp / 10_000) if side is Side.LONG else entry * (1 + risk_bp / 10_000)
     target = 101.0 if side is Side.LONG else 99.0
     return _LaneCandidate(
         setup_id=f"{lane}-{side.value}-{risk_bp}", lane=lane, symbol="XUSDT", side=side,
-        trigger_now=True, armed_at_ms=1, expires_at_ms=2, target_level=None,
+        trigger_now=True, armed_at_ms=1, expires_at_ms=2,
+        target_level=Level("reference", "XUSDT", "1m", LevelSide.HIGH, 100.5, 0),
         target_price=target, stop_price=stop, invalidation_price=stop,
         reference_price=None, sweep_extreme_price=None, score=1.0, features={},
     )
@@ -118,7 +127,7 @@ def test_trigger_rejects_risk_outside_bounds_for_all_executable_lane_shapes(side
     for lane in (LaneName.CASCADE_IMPULSE.value, LaneName.FRESH_EXTREME_MOMENTUM.value, LaneName.STRUCTURAL_REACTION.value):
         result = StrategyV2Evaluator()._trigger(trigger_candidate(side, 50.01, lane), frame)
         assert result.status == DecisionStatus.REJECTED.value
-        assert result.reason == "risk_out_of_bounds"
+        assert result.reason == "diagnostic_only"
 
 
 def test_trigger_rejects_live_ena_inverted_short_bracket() -> None:
@@ -127,7 +136,7 @@ def test_trigger_rejects_live_ena_inverted_short_bracket() -> None:
     candidate = candidate.__class__(**{**candidate.__dict__, "symbol": "ENAUSDT", "stop_price": 0.15061527, "target_price": 0.14622})
     result = StrategyV2Evaluator()._trigger(candidate, frame)
     assert result.status == DecisionStatus.REJECTED.value
-    assert result.reason == "invalid_signal_bracket"
+    assert result.reason == "diagnostic_only"
 
 
 def build_failed_sweep_fixture():
@@ -141,6 +150,8 @@ def build_failed_sweep_fixture():
         bar(60_000, i * 60_000, 99.96 + i * 0.02, 100.15 + i * 0.02, 99.88 + i * 0.02, 100.02 + i * 0.02, 10.0)
         for i in range(15)
     ]
+    # The arm must come from the completed 1m candle, not the 15s sweep.
+    bars_1m[-1] = bar(60_000, 840_000, 100.30, 100.36, 99.78, 100.05, -80.0)
     level = Level("support", "XUSDT", "15m", LevelSide.LOW, 100.0, 0)
     arm_frame = OrderflowFrame(
         "XUSDT",
@@ -401,7 +412,8 @@ def test_terminal_lane_can_trade_the_first_break_but_not_reuse_the_level() -> No
         "1m": [
             bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
             bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
-        ]
+        ],
+        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
     }
     levels = [
         Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
@@ -444,7 +456,114 @@ def test_terminal_lane_can_trade_the_first_break_but_not_reuse_the_level() -> No
     assert first.status == DecisionStatus.TRIGGERED.value
     assert first.target_level is not None
     assert first.target_level.level_class == "cluster"
+    assert first.features["reaction_type"] == "confirmed_breakout"
+    assert first.features["reference_level_id"] == first.target_level.level_id
+    assert first.features["reference_level_timeframe"] == first.target_level.timeframe
+    assert first.features["reference_level_price"] == pytest.approx(first.target_level.price)
+    assert first.features["trigger_1m_closed_at_ms"] == 120_000
     assert later.status == DecisionStatus.REJECTED.value
+
+
+@pytest.mark.parametrize("timeframe", sorted(DIGASH_LEVEL_TIMEFRAMES))
+def test_terminal_break_accepts_reference_level_from_every_runtime_timeframe(timeframe: str) -> None:
+    bars = {
+        "1m": [
+            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
+            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
+        ],
+        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
+    }
+    levels = [
+        Level("a", "XUSDT", timeframe, LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000, level_version=DIGASH_LEVEL_VERSION),
+        Level("b", "XUSDT", timeframe, LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000, level_version=DIGASH_LEVEL_VERSION),
+    ]
+    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 20, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
+    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
+        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
+    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
+    assert result.status == DecisionStatus.TRIGGERED.value
+    assert result.target_level is not None
+    assert result.target_level.timeframe == timeframe
+
+
+def test_terminal_break_requires_15s_and_orderflow_confirmation() -> None:
+    bars = {
+        "1m": [
+            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
+            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
+        ],
+        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
+    }
+    levels = [
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
+    ]
+    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 0.1, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
+    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
+        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
+    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
+    assert result.signal is None
+    assert result.reason == "no_orderflow_confirmation"
+
+
+def test_terminal_break_rejects_15s_reclaim_back_under_reference_level() -> None:
+    bars = {
+        "1m": [
+            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
+            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
+        ],
+        "15s": [bar(15_000, 105_000, 100.8, 100.9, 100.4, 100.5, 20.0)],
+    }
+    levels = [
+        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
+        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
+    ]
+    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 100, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
+    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
+        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
+    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
+    assert result.signal is None
+    assert result.reason == "no_15s_confirmation"
+
+
+def test_trigger_rejects_reference_level_broken_before_arm() -> None:
+    evaluator = StrategyV2Evaluator()
+    candidate = trigger_candidate(Side.LONG, 20.0)
+    candidate = candidate.__class__(
+        **{
+            **candidate.__dict__,
+            "armed_at_ms": 100,
+            "target_level": Level("old", "XUSDT", "1m", LevelSide.HIGH, 100.5, 0, broken_at_ms=99),
+        }
+    )
+    frame = OrderflowFrame("XUSDT", 100, 100, 10, 100.1, 10, 100, 1, 1, 1, 2_000, 1_000, 1, 1, 1)
+    result = evaluator._trigger(candidate, frame)
+    assert result.signal is None
+    assert result.reason == "invalid_reference_level_lifecycle"
+
+
+def test_non_executable_impulse_lanes_never_emit_signals() -> None:
+    frame = OrderflowFrame("XUSDT", 100, 100, 10, 100.1, 10, 100, 1, 20, 10, 2_000, 1_000, .5, 10, 1)
+    decisions = StrategyV2Evaluator().evaluate(symbol="XUSDT", now_ms=100, bars={}, levels=[], orderflow=frame)
+    for lane in (LaneName.EARLY_TARGET_HUNT, LaneName.TARGET_SEEKING_BREAKOUT,
+                 LaneName.STRUCTURAL_REACTION, LaneName.CASCADE_IMPULSE,
+                 LaneName.FRESH_EXTREME_MOMENTUM):
+        result = decision(decisions, lane.value)
+        assert result.signal is None
+        assert result.reason == "diagnostic_only"
+
+
+def test_sweep_15s_without_completed_1m_reclaim_cannot_arm() -> None:
+    fixture = build_failed_sweep_fixture()
+    bars_1m = [*fixture["bars"]["1m"]]
+    bars_1m[-1] = bar(60_000, 840_000, 100.30, 100.36, 100.02, 100.05, -80.0)
+    result = decision(StrategyV2Evaluator(min_book_imbalance=0.01).evaluate(
+        symbol="XUSDT", now_ms=fixture["arm_now"],
+        bars={"15s": fixture["bars"]["15s"][:-1], "1m": bars_1m},
+        levels=fixture["levels"], orderflow=fixture["arm_frame"]
+    ), LaneName.FAILED_SWEEP_RECLAIM.value)
+    assert result.signal is None
+    assert result.reason == "no_sweep_setup"
 
 
 def test_cascade_geometry_records_ordered_distinct_levels_without_a_hidden_gate() -> None:
@@ -650,7 +769,8 @@ def test_lane_separation_keeps_diagnostic_lanes_non_trading() -> None:
         levels=[*sweep["levels"], *structural["levels"]],
         orderflow=structural["frame"],
     )
-    assert decision(decisions, LaneName.STRUCTURAL_REACTION.value).status == DecisionStatus.TRIGGERED.value
+    assert decision(decisions, LaneName.STRUCTURAL_REACTION.value).status == DecisionStatus.REJECTED.value
+    assert decision(decisions, LaneName.STRUCTURAL_REACTION.value).reason == "diagnostic_only"
     assert decision(decisions, LaneName.FAILED_SWEEP_RECLAIM.value).status == DecisionStatus.REJECTED.value
     assert decision(decisions, LaneName.DOM_CONFIRMED_BREAKOUT.value).status == DecisionStatus.REJECTED.value
     assert decision(decisions, LaneName.DIAGONAL_CONTEXT.value).status == DecisionStatus.REJECTED.value

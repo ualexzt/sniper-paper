@@ -26,6 +26,9 @@ class Quote:
     ask_size: float = 0.0
     bids: Mapping[float, float] | None = None
     asks: Mapping[float, float] | None = None
+    # Optional at the wire boundary for backwards-compatible fixtures.  The
+    # app always populates it so consumers can enforce symbol ownership.
+    symbol: str | None = None
 
     def __post_init__(self) -> None:
         if self.bid <= 0 or self.ask <= 0 or self.bid >= self.ask:
@@ -66,6 +69,7 @@ class PendingPaperOrder:
     queue_ahead_qty: float = 0.0
     displayed_ahead_qty: float = 0.0
     status: str = "PENDING"
+    qty_step: float = 0.0
 
     @property
     def remaining_qty(self) -> float:
@@ -158,6 +162,7 @@ class PaperExecutor:
                 expires_at_ms=int(order["created_at_ms"]) + self.latency_ms + self.entry_ttl_ms,
                 entry_price=float(order["entry_price"]),
                 quantity=float(order["quantity"]),
+                qty_step=float(order["qty_step"] or 0.0),
                 filled_qty=float(order["filled_qty"]),
                 queue_ahead_qty=float(order["queue_ahead_qty"]),
                 displayed_ahead_qty=float(order["queue_ahead_qty"]),
@@ -205,6 +210,7 @@ class PaperExecutor:
             expires_at_ms=signal.occurred_at_ms + self.latency_ms + self.entry_ttl_ms,
             entry_price=entry,
             quantity=quantity,
+            qty_step=max(0.0, float(qty_step)),
         )
         self.pending = pending
         self.journal.record_paper_order(
@@ -219,6 +225,7 @@ class PaperExecutor:
                 "lane": signal.lane,
                 "entry_price": entry,
                 "quantity": quantity,
+                "qty_step": pending.qty_step,
                 "filled_qty": 0.0,
                 "queue_ahead_qty": 0.0,
                 "status": "PENDING",
@@ -345,7 +352,10 @@ class PaperExecutor:
         remaining_trade -= consumed
         remaining_before_fill = order.remaining_qty
         fill_qty = min(remaining_before_fill, remaining_trade)
-        if fill_qty <= self._quantity_epsilon(queue_before, quantity, consumed, remaining_trade):
+        if fill_qty <= self._quantity_epsilon(
+            queue_before, quantity, consumed, remaining_trade,
+            qty_step=order.qty_step,
+        ):
             self.journal.update_paper_order(order.order_id, queue_ahead_qty=order.queue_ahead_qty)
             return {"event": "QUEUE", "queue_consumed": consumed, "filled_qty": 0.0}
         self._fill(order, fill_qty, received_at_ms, remaining_before_fill)
@@ -400,7 +410,10 @@ class PaperExecutor:
                 entry_price=self.position.entry_price,
                 entry_fee=self.position.entry_fee,
             )
-        order.status = "FILLED" if order.remaining_qty <= self._quantity_epsilon(remaining_before_fill, fill_qty) else "PARTIAL"
+        order.status = "FILLED" if order.remaining_qty <= self._quantity_epsilon(
+            remaining_before_fill, fill_qty,
+            qty_step=order.qty_step,
+        ) else "PARTIAL"
         self.journal.update_paper_order(
             order.order_id,
             status=order.status,
@@ -411,13 +424,14 @@ class PaperExecutor:
             self.pending = None
 
     @staticmethod
-    def _quantity_epsilon(*values: float) -> float:
+    def _quantity_epsilon(*values: float, qty_step: float = 0.0) -> float:
         """Ignore subtraction residue, while retaining genuine small fills."""
-        epsilon = max((math.ulp(abs(value)) for value in values if math.isfinite(value)), default=0.0)
-        # A subtraction can accumulate one rounding unit from each operand;
-        # the quantity step remains an execution constraint, not a reason to
-        # discard a legitimate partial below an arbitrary absolute threshold.
-        return 4.0 * epsilon
+        epsilon = max(
+            (math.ulp(abs(value)) for value in values if math.isfinite(value)),
+            default=0.0,
+        )
+        step_guard = abs(qty_step) * 1e-12 if math.isfinite(qty_step) and qty_step > 0 else 0.0
+        return max(8.0 * epsilon, step_guard)
 
     def _close(self, quote: Quote, reason: str) -> Mapping[str, Any]:
         position = self.position

@@ -45,6 +45,7 @@ class ProfitProtection:
         if taker_fee_rate < 0 or slippage_bp < 0:
             raise ValueError("cost parameters cannot be negative")
         self.position_id = position.position_id
+        self.symbol = position.signal.symbol
         self.side = position.signal.side
         self.entry_price = position.entry_price
         self.stop_price = position.signal.stop_price
@@ -112,7 +113,7 @@ class ProfitProtection:
                 "protected_floor": self.protected_floor, "structure_loss": structure_loss}
 
     def on_quote(self, quote: Quote) -> list[dict[str, Any]]:
-        if not self.config.enabled:
+        if not self.config.enabled or (quote.symbol is not None and quote.symbol != self.symbol):
             return []
         item = self._base(quote)
         if not item["active"] or item["net_pnl"] > item["protected_floor"]:
@@ -125,7 +126,14 @@ class ProfitProtection:
         return rows
 
     def on_footprint(self, footprint: dict[str, Any], quote: Quote | None) -> list[dict[str, Any]]:
-        if not self.config.enabled or quote is None or footprint.get("incomplete") or footprint.get("partial"):
+        if (
+            not self.config.enabled
+            or quote is None
+            or (quote.symbol is not None and quote.symbol != self.symbol)
+            or (footprint.get("symbol") is not None and str(footprint["symbol"]) != self.symbol)
+            or footprint.get("incomplete")
+            or footprint.get("partial")
+        ):
             return []
         readiness = footprint.get("feed_readiness") or {}
         # A bucket is eligible only when the producer explicitly attests that

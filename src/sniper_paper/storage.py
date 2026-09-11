@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class Journal:
@@ -107,6 +107,7 @@ class Journal:
                     lane TEXT NOT NULL,
                     entry_price REAL,
                     quantity REAL NOT NULL DEFAULT 0,
+                    qty_step REAL NOT NULL DEFAULT 0,
                     filled_qty REAL NOT NULL DEFAULT 0,
                     queue_ahead_qty REAL NOT NULL DEFAULT 0,
                     status TEXT NOT NULL CHECK(status IN ('PENDING', 'ACTIVE', 'PARTIAL', 'FILLED', 'MISSED', 'CANCELLED')),
@@ -257,6 +258,9 @@ class Journal:
                     ON signal_path_events(signal_id, occurred_at_ms, event_id);
                 """
             )
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(paper_orders)")}
+            if "qty_step" not in columns:
+                db.execute("ALTER TABLE paper_orders ADD COLUMN qty_step REAL NOT NULL DEFAULT 0")
             db.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -370,6 +374,7 @@ class Journal:
             "lane",
             "entry_price",
             "quantity",
+            "qty_step",
             "filled_qty",
             "queue_ahead_qty",
             "status",
@@ -394,6 +399,7 @@ class Journal:
             "missed_at_ms",
             "entry_price",
             "quantity",
+            "qty_step",
             "filled_qty",
             "queue_ahead_qty",
             "status",

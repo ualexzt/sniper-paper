@@ -1,13 +1,13 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.7.0",
+  "version": "v2.8.0",
   "status": "frozen_spec",
   "versions": {
-    "strategy": "v2.5.2-uniform-risk-brackets",
+    "strategy": "v2.6.0-level-reaction-only",
     "level": "digash_horizontal_levels_v3_touch_episodes",
     "universe": "daily_universe_v2_shadow_metrics",
-    "execution": "paper_execution_v2_dust_guard",
-    "profit_protection": "paper_profit_protection_shadow_v2",
+    "execution": "paper_execution_v2_dust_guard_relative_epsilon",
+    "profit_protection": "paper_profit_protection_shadow_v2_symbol_scoped",
     "source_data_contract": "bybit_public_market_data_v2_complete_buckets"
   },
   "session_policy": {
@@ -53,6 +53,14 @@
     "reactivation_allowed": false,
     "legacy_15m_4h_runtime_allowed": false
   },
+  "level_reaction_execution_policy": {
+    "trigger_timeframe": "1m",
+    "confirmation_timeframe": "15s",
+    "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
+    "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
+    "orderflow_required": true,
+    "non_reaction_lanes": "diagnostic_only"
+  },
   "shadow_diagnostics_policy": {
     "enabled": true,
     "execution_link_allowed": false,
@@ -80,7 +88,7 @@
     "same_bar_without_trade_order": "AMBIGUOUS"
   },
   "profit_protection_policy": {
-    "version": "paper_profit_protection_shadow_v2",
+    "version": "paper_profit_protection_shadow_v2_symbol_scoped",
     "execution_link_allowed": false,
     "net_executable_pnl": true,
     "floor_is_monotonic": true
@@ -178,8 +186,8 @@
       "name": "early_target_hunt",
       "role": "preparation",
       "direction": "both",
-      "attempts_per_setup": 1,
-      "diagnostic": false,
+      "attempts_per_setup": 0,
+      "diagnostic": true,
       "confirmation_timeout_ms": 30000,
       "cooldown_ms": 60000
     },
@@ -194,37 +202,37 @@
     },
     {
       "name": "target_seeking_breakout",
-      "role": "execution",
+      "role": "diagnostic",
       "direction": "both",
-      "attempts_per_setup": 1,
-      "diagnostic": false,
+      "attempts_per_setup": 0,
+      "diagnostic": true,
       "confirmation_timeout_ms": 30000,
       "cooldown_ms": 60000
     },
     {
       "name": "structural_reaction",
-      "role": "reaction",
+      "role": "diagnostic",
       "direction": "both",
-      "attempts_per_setup": 1,
-      "diagnostic": false,
+      "attempts_per_setup": 0,
+      "diagnostic": true,
       "confirmation_timeout_ms": 2000,
       "cooldown_ms": 60000
     },
     {
       "name": "cascade_impulse",
-      "role": "execution",
+      "role": "diagnostic",
       "direction": "both",
-      "attempts_per_setup": 1,
-      "diagnostic": false,
+      "attempts_per_setup": 0,
+      "diagnostic": true,
       "confirmation_timeout_ms": 2000,
       "cooldown_ms": 60000
     },
     {
       "name": "fresh_extreme_momentum",
-      "role": "execution",
+      "role": "diagnostic",
       "direction": "both",
-      "attempts_per_setup": 1,
-      "diagnostic": false,
+      "attempts_per_setup": 0,
+      "diagnostic": true,
       "confirmation_timeout_ms": 2000,
       "cooldown_ms": 60000
     },
@@ -246,9 +254,7 @@
     }
   ],
   "unvalidated_hypotheses": [
-    "early_target_hunt arms on trend plus consolidation and defers execution to target_seeking_breakout.",
-    "target_seeking_breakout is the executable breakout continuation for the same consolidation context.",
-    "structural_reaction, cascade_impulse, and fresh_extreme_momentum are conservative v2-only hypotheses that still obey one-attempt and causal expiry rules.",
+    "early_target_hunt, target_seeking_breakout, structural_reaction, cascade_impulse, and fresh_extreme_momentum are diagnostics only and have no execution path.",
     "dom_confirmed_breakout and diagonal_context are diagnostic and must never emit tradable signals.",
     "retest_reclaim_v1, density_bounce_v1, and cascade_terminal_exit persist only to shadow_diagnostics and have no execution path."
   ]

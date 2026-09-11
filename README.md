@@ -29,14 +29,16 @@ For a plain-language Ukrainian explanation, see
   causal close-through: two consecutive completed 1m closes or one completed
   source-timeframe close at least one tick beyond it. Wicks do not invalidate
   levels, and broken levels never reactivate after price returns.
-- V2 keeps nine named lanes isolated. `failed_sweep_reclaim` is primary;
-  breakout/reaction lanes remain separate hypotheses, while
-  `dom_confirmed_breakout` and `diagonal_context` are diagnostic-only.
+- V2 keeps nine named lanes isolated. Only direct reactions at active
+  horizontal levels can execute: `failed_sweep_reclaim` and
+  `terminal_level_breakout`, using completed 1m structure plus 15s/orderbook
+  confirmation. All other lanes are preparation or shadow diagnostics and
+  cannot create paper orders.
 - Entry is a simulated post-only order after 250 ms. It freezes the signal-time
   best price, waits behind displayed queue, uses only exact-price opposing
   public trades for fills, supports partial fills, and cancels the remainder
   after a two-second TTL. Book cancellations never invent a fill.
-- SQLite schema v5 stores the frozen universe and instrument increments, bars,
+- SQLite schema v7 stores the frozen universe and instrument increments, bars,
   durable level lifecycle/history, actionable decisions, independent TP/SL
   signal paths, paper orders/queue state, positions, costs, P&L, and service
   events across restarts.

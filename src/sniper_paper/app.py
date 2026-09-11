@@ -469,7 +469,7 @@ class PaperApp:
                 quote = self._quote(state, received_at_ms)
                 # Observe the closing quote before baseline execution mutates
                 # executor.position; this preserves shadow continuity.
-                self._observe_profit_protection(quote)
+                self._observe_profit_protection(symbol, quote)
                 execution = self.executor.on_quote(symbol, quote)
                 if execution and execution.get("event") == "CLOSE" and self.profit_protection is not None:
                     for event in self.profit_protection.on_baseline_close(dict(execution)):
@@ -537,6 +537,7 @@ class PaperApp:
             state.book.asks[state.book.best_ask],
             dict(state.book.bids),
             dict(state.book.asks),
+            symbol=state.symbol,
         )
 
     def _complete_footprint(self, footprint: dict[str, Any], evaluated_at_ms: int | None = None) -> None:
@@ -576,13 +577,19 @@ class PaperApp:
 
         if self.profit_protection is not None and state.book.ready:
             quote = self._quote(state, evaluated_at_ms or bar.closed_at_ms)
+            if self.profit_protection.symbol != symbol:
+                return
             for event in self.profit_protection.on_footprint(footprint, quote):
                 self.journal.record_profit_shadow_event(event, self.protocol_hash)
 
-    def _observe_profit_protection(self, quote: Quote) -> None:
+    def _observe_profit_protection(self, symbol: str, quote: Quote) -> None:
         position = getattr(self.executor, "position", None)
         if position is None:
             self.profit_protection = None
+            return
+        # There is one portfolio position, but many symbol books.  Never feed
+        # another symbol's executable quote into its shadow guard.
+        if position.signal.symbol != symbol:
             return
         if self.profit_protection is None or self.profit_protection.position_id != position.position_id:
             self.profit_protection = ProfitProtection(

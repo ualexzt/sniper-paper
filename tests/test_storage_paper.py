@@ -105,6 +105,35 @@ def test_float_queue_residue_is_not_a_position(tmp_path: Path) -> None:
     assert executor.position is None
 
 
+def test_restored_pending_float_queue_residue_is_not_a_position(tmp_path: Path) -> None:
+    database = tmp_path / "paper.db"
+    journal = Journal(database)
+    signal = PaperSignal("restored-dust", 0, "BTCUSDT", Side.LONG, "cascade_impulse", 99, 103)
+    journal.record_signal(signal_row(signal))
+    executor = PaperExecutor(journal, latency_ms=0)
+    assert executor.submit(signal, quote(0, bid_size=0.3), qty_step=0.1)
+    executor.on_quote("BTCUSDT", quote(0, bid_size=0.3))
+
+    restored = PaperExecutor(journal, latency_ms=0)
+    assert restored.restore() and restored.pending is not None
+    result = restored.on_trade("BTCUSDT", 1, "Sell", 100.0, 0.1 + 0.2)
+    assert result and result["event"] == "QUEUE" and result["filled_qty"] == 0.0
+    assert restored.position is None
+
+
+def test_paper_order_qty_step_has_additive_legacy_migration(tmp_path: Path) -> None:
+    database = tmp_path / "paper.db"
+    Journal(database)
+    with sqlite3.connect(database) as db:
+        db.execute("ALTER TABLE paper_orders RENAME COLUMN qty_step TO legacy_qty_step")
+        db.commit()
+    Journal(database)
+    with sqlite3.connect(database) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(paper_orders)")}
+        assert "qty_step" in columns
+        assert db.execute("SELECT qty_step FROM paper_orders").fetchone() is None
+
+
 def test_small_real_partial_fill_is_retained(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "paper.db")
     signal = PaperSignal("partial", 0, "BTCUSDT", Side.LONG, "cascade_impulse", 99, 103)
