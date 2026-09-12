@@ -17,7 +17,7 @@ from sniper_paper.orderflow import Footprint
 from sniper_paper.paper import PaperSignal, Side
 from sniper_paper.storage import Journal
 from sniper_paper.strategy import Level, LevelSide
-from sniper_paper.strategy_v2 import DecisionStatus, StrategyDecision, StrategySignal
+from sniper_paper.strategy_v2 import DecisionStatus, StrategyDecision, StrategySignal, StrategyV2Evaluator
 
 
 @pytest.mark.parametrize("book_first", [True, False])
@@ -470,6 +470,7 @@ def test_observation_only_still_refreshes_orderflow_panel(tmp_path: Path) -> Non
     state.bars["15s"] = [Bar("XUSDT", 15_000, 0, 15_000, 100, 100.01, 99.99, 100, 1, 250, 2)]
     app.stream_connected = True
     app.evaluation_eligible = False
+    app.strategies = {"XUSDT": StrategyV2Evaluator()}
 
     app._evaluate_v2(state, {"stacks": [{"side": "buy"}]}, 15_000)
 
@@ -477,6 +478,47 @@ def test_observation_only_still_refreshes_orderflow_panel(tmp_path: Path) -> Non
     assert state.last_orderflow["delta_15s"] == 250
     assert state.last_orderflow["footprint_stack"] == 1
     assert "status" not in state.last_orderflow
+
+
+def test_observation_only_records_classified_reaction_without_execution(tmp_path: Path, monkeypatch) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("XUSDT")
+    now_ms = 400_000
+    state.book.apply(
+        {"type": "snapshot", "data": {"s": "XUSDT", "u": 1, "seq": 1,
+                                        "b": [["100", "20"]], "a": [["100.01", "5"]]}},
+        now_ms,
+    )
+    state.snapshot_received_at_ms = 0
+    state.orderflow_ready = True
+    state.bars["15s"] = [
+        Bar("XUSDT", 15_000, i * 15_000, (i + 1) * 15_000, 100, 100.1, 99.9, 100, 1, 100, 2)
+        for i in range(21)
+    ]
+    app.stream_connected = True
+    app.evaluation_eligible = False
+    signal = StrategySignal("observed", now_ms, "XUSDT", Side.LONG,
+                            "terminal_level_breakout", 99.8, 100.4, now_ms + 2_000, now_ms + 60_000)
+    level = Level("level", "XUSDT", "1m", LevelSide.HIGH, 99.9, 0)
+    observed = StrategyDecision(signal, signal.lane, DecisionStatus.TRIGGERED.value, "frozen_rules_met",
+                                Side.LONG, level, signal.target_price, signal.stop_price, level.price,
+                                "setup", {"reaction_type": "orderflow_breakout"})
+
+    class StubEvaluator:
+        def evaluate(self, **kwargs):
+            return [observed]
+
+        def active_approaches(self):
+            return []
+
+    app.strategies = {"XUSDT": StubEvaluator()}
+    monkeypatch.setattr(app.executor, "submit", lambda *args, **kwargs: pytest.fail("observation-only submitted"))
+    app._evaluate_v2(state, {"stacks": []}, now_ms)
+    rows = journal.shadow_diagnostics("XUSDT", protocol_hash=app.protocol_hash)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "OBSERVED"
+    assert rows[0]["reason"] == "partial_day_observation_only"
 
 
 def test_signal_path_records_first_touch_once_and_is_not_a_fill(tmp_path: Path) -> None:

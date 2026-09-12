@@ -700,7 +700,7 @@ class PaperApp:
             # Proximity to a level is price-derived and may be armed even when
             # the latest book update is stale. The evaluator's own data-quality
             # gate prevents a stale/spread frame from producing a signal.
-            if blocker != "book_stale_or_spread":
+            if blocker not in {"book_stale_or_spread", "partial_day_observation_only"}:
                 return
         state.last_blocker = None
         levels = list(state.levels)
@@ -713,6 +713,28 @@ class PaperApp:
         )
         state.last_orderflow["level_approaches"] = self.strategies[state.symbol].active_approaches()
         if blocker:
+            if blocker == "partial_day_observation_only":
+                for decision in decisions:
+                    if decision.signal is None:
+                        continue
+                    reference = decision.target_level
+                    self._record_shadow(
+                        {
+                            "diagnostic_id": f"{decision.signal.signal_id}:observation_only",
+                            "setup_id": decision.setup_id,
+                            "occurred_at_ms": now_ms,
+                            "symbol": state.symbol,
+                            "lane": decision.lane,
+                            "side": decision.signal.side.value,
+                            "status": "OBSERVED",
+                            "reason": blocker,
+                            "reference_price": None if reference is None else reference.price,
+                            "stop_price": decision.signal.stop_price,
+                            "target_price": decision.signal.target_price,
+                            "protocol_hash": self.protocol_hash,
+                            "features": {**dict(decision.features), "evaluation_eligible": "false"},
+                        }
+                    )
             return
         price = state.bars["15s"][-1].close
         for decision in decisions:
