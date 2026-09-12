@@ -64,9 +64,9 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
     payload = json.loads(v2_path.read_text(encoding="utf-8"))
 
-    assert payload["version"] == "v2.8.1"
+    assert payload["version"] == "v2.9.0"
     assert payload["versions"] == {
-        "strategy": "v2.6.1-level-reaction-causal-guards",
+        "strategy": "v2.7.0-level-approach-orderflow",
         "level": "digash_horizontal_levels_v3_touch_episodes",
         "universe": "daily_universe_v2_shadow_metrics",
         "execution": "paper_execution_v2_dust_guard_relative_epsilon",
@@ -99,8 +99,9 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
         "legacy_15m_4h_runtime_allowed": False,
     }
     assert payload["level_reaction_execution_policy"] == {
-        "trigger_timeframe": "1m",
-        "confirmation_timeframe": "15s",
+        "context_timeframe": "1m",
+        "approach_timeframe": "15s",
+        "reaction_timeframe": "15s",
         "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
         "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
         "orderflow_required": True,
@@ -108,6 +109,7 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
         "sweep_confirmation_close_must_reclaim_level": True,
         "pending_reference_revalidated_at_confirmation": True,
         "minute_completion_retries_boundary_footprint": True,
+        "approach_must_precede_reaction": True,
         "non_reaction_lanes": "diagnostic_only",
     }
     assert payload["safety_boundary"]["paper_only"] is True

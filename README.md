@@ -31,8 +31,10 @@ For a plain-language Ukrainian explanation, see
   levels, and broken levels never reactivate after price returns.
 - V2 keeps nine named lanes isolated. Only direct reactions at active
   horizontal levels can execute: `failed_sweep_reclaim` and
-  `terminal_level_breakout`, using completed 1m structure plus 15s/orderbook
-  confirmation. All other lanes are preparation or shadow diagnostics and
+  `terminal_level_breakout`. A completed 15s bar inside the configured zone
+  arms observation before the reaction; a later completed 15s bar and current
+  order book must classify a rejection or breakout. The 1m chart remains the
+  trading context. All other lanes are preparation or shadow diagnostics and
   cannot create paper orders.
 - Entry is a simulated post-only order after 250 ms. It freezes the signal-time
   best price, waits behind displayed queue, uses only exact-price opposing

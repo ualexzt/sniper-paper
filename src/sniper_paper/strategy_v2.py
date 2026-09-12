@@ -213,6 +213,14 @@ class _PendingSetup:
     features: Mapping[str, float | str]
 
 
+@dataclass
+class _LevelApproach:
+    level: Level
+    armed_at_ms: int
+    expires_at_ms: int
+    approach_side: str
+
+
 def _hash(*parts: object) -> str:
     raw = "|".join(str(part) for part in parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
@@ -376,6 +384,10 @@ class StrategyV2Evaluator:
         cascade_min_body_to_range: float = 0.6,
         cascade_min_delta_ratio: float = 2.0,
         fresh_extreme_lookback_4h: int = 6,
+        approach_zone_bp: float = 20.0,
+        approach_min_ticks: int = 3,
+        approach_timeout_ms: int = 120_000,
+        reaction_buffer_ticks: int = 1,
     ) -> None:
         self.tick_size = tick_size
         self.entry_latency_ms = entry_latency_ms
@@ -403,13 +415,32 @@ class StrategyV2Evaluator:
         self.cascade_min_body_to_range = cascade_min_body_to_range
         self.cascade_min_delta_ratio = cascade_min_delta_ratio
         self.fresh_extreme_lookback_4h = fresh_extreme_lookback_4h
+        self.approach_zone_bp = approach_zone_bp
+        self.approach_min_ticks = approach_min_ticks
+        self.approach_timeout_ms = approach_timeout_ms
+        self.reaction_buffer_ticks = reaction_buffer_ticks
         self._pending: dict[str, _PendingSetup] = {}
+        self._approaches: dict[str, _LevelApproach] = {}
+        self._consumed_approaches: set[str] = set()
         self._attempted: set[str] = set()
         self._cooldown_until_ms: dict[str, int] = {}
         self._last_triggered: dict[tuple[str, str], tuple[int, str, Side]] = {}
 
     def restore_attempts(self, attempts: Iterable[str]) -> None:
         self._attempted.update(attempts)
+
+    def active_approaches(self) -> list[Mapping[str, float | int | str]]:
+        return [
+            {
+                "level_id": item.level.level_id,
+                "timeframe": item.level.timeframe,
+                "side": item.level.side.value,
+                "price": item.level.price,
+                "armed_at_ms": item.armed_at_ms,
+                "expires_at_ms": item.expires_at_ms,
+            }
+            for item in sorted(self._approaches.values(), key=lambda row: (row.level.price, row.level.level_id))
+        ]
 
     def evaluate(
         self,
@@ -449,9 +480,168 @@ class StrategyV2Evaluator:
             self._fresh_extreme_momentum(symbol, now_ms, completed, level_list, orderflow),
             self._diagonal_context(symbol, now_ms, completed, level_list, orderflow),
         ]
+        self._refresh_level_approaches(symbol, now_ms, completed.get("15s", ()), level_list)
         return decisions
 
+    def _refresh_level_approaches(
+        self,
+        symbol: str,
+        now_ms: int,
+        bars_15s: Sequence[Bar],
+        levels: Sequence[Level],
+    ) -> None:
+        active_by_id = {
+            level.level_id: level
+            for level in canonical_level_catalog(levels, symbol, now_ms)
+            if level.timeframe in DIGASH_LEVEL_TIMEFRAMES
+        }
+        self._consumed_approaches.intersection_update(active_by_id)
+        for level_id, approach in list(self._approaches.items()):
+            current = active_by_id.get(level_id)
+            if current is None or now_ms > approach.expires_at_ms:
+                self._approaches.pop(level_id, None)
+                if current is not None:
+                    self._consumed_approaches.add(level_id)
+            else:
+                approach.level = current
+        if not bars_15s:
+            return
+        current = bars_15s[-1]
+        candidates: list[tuple[float, Level, str]] = []
+        for level in active_by_id.values():
+            close_distance = abs(current.close / level.price - 1.0) * 10_000
+            distance = (
+                max(0.0, (level.price - current.high) / level.price * 10_000)
+                if level.side is LevelSide.HIGH
+                else max(0.0, (current.low - level.price) / level.price * 10_000)
+            )
+            zone = max(self.approach_zone_bp, self.approach_min_ticks * self.tick_size / level.price * 10_000)
+            if level.level_id in self._consumed_approaches:
+                if close_distance > zone:
+                    self._consumed_approaches.remove(level.level_id)
+                else:
+                    continue
+            if distance > zone:
+                continue
+            if level.side is LevelSide.HIGH and current.close <= level.price:
+                candidates.append((distance, level, "below"))
+            elif level.side is LevelSide.LOW and current.close >= level.price:
+                candidates.append((distance, level, "above"))
+        for _, level, approach_side in sorted(candidates, key=lambda row: (row[0], row[1].level_id)):
+            self._approaches.setdefault(
+                level.level_id,
+                _LevelApproach(level, current.closed_at_ms, current.closed_at_ms + self.approach_timeout_ms, approach_side),
+            )
+
+    def _approached_levels(
+        self,
+        symbol: str,
+        current: Bar,
+        levels: Sequence[Level],
+    ) -> list[_LevelApproach]:
+        current_by_id = {level.level_id: level for level in levels if level.symbol == symbol}
+        result: list[_LevelApproach] = []
+        for approach in self._approaches.values():
+            level = current_by_id.get(approach.level.level_id)
+            if (
+                level is not None
+                and approach.armed_at_ms <= current.opened_at_ms
+                and current.closed_at_ms <= approach.expires_at_ms
+                and level_active_at(level, current.opened_at_ms)
+            ):
+                approach.level = level
+                result.append(approach)
+        return result
+
     def _failed_sweep_reclaim(
+        self,
+        symbol: str,
+        now_ms: int,
+        bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level],
+        frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        lane = LaneName.FAILED_SWEEP_RECLAIM.value
+        if not self._data_quality_ok(frame):
+            return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
+        fifteen = bars.get("15s", ())
+        if len(fifteen) < 21 or frame.median_abs_delta_20 <= 0:
+            return self._reject(lane=lane, reason="warmup", side=None, features={})
+        current = fifteen[-1]
+        atr = _atr_1m(bars.get("1m", ()))
+        if atr is None:
+            return self._reject(lane=lane, reason="warmup", side=None, features={})
+        candidates: list[_LaneCandidate] = []
+        for approach in self._approached_levels(symbol, current, levels):
+            level = approach.level
+            buffer = self.reaction_buffer_ticks * self.tick_size
+            if level.side is LevelSide.LOW:
+                side = Side.LONG
+                reacted = current.low <= level.price - buffer and current.close > level.price
+                flow = (
+                    abs(frame.delta_notional) >= frame.median_abs_delta_20
+                    and frame.microprice > frame.mid
+                    and frame.book_imbalance >= self.min_book_imbalance
+                    and frame.top5_bid_notional >= self.min_depth_notional_top5
+                    and frame.best_bid > level.price
+                )
+                entry = frame.best_bid
+                stop = current.low - max(2 * self.tick_size, 0.2 * atr)
+            else:
+                side = Side.SHORT
+                reacted = current.high >= level.price + buffer and current.close < level.price
+                flow = (
+                    abs(frame.delta_notional) >= frame.median_abs_delta_20
+                    and frame.microprice < frame.mid
+                    and frame.book_imbalance <= -self.min_book_imbalance
+                    and frame.top5_ask_notional >= self.min_depth_notional_top5
+                    and frame.best_ask < level.price
+                )
+                entry = frame.best_ask
+                stop = current.high + max(2 * self.tick_size, 0.2 * atr)
+            if not reacted or not flow:
+                continue
+            risk_bp = _level_distance_bp(entry, stop)
+            if not self.min_risk_bp <= risk_bp <= self.max_risk_bp:
+                continue
+            reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
+            obstacle = _nearest_target(
+                levels, symbol=symbol, side=side, price=entry, now_ms=now_ms,
+                timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True,
+            )
+            if obstacle is not None and _level_distance_bp(entry, obstacle.price) < reward_bp:
+                continue
+            target_price = entry * (1 + reward_bp / 10_000) if side is Side.LONG else entry * (1 - reward_bp / 10_000)
+            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
+            features = {
+                "reaction_type": "orderflow_rejection",
+                "reference_level_id": level.level_id,
+                "reference_level_timeframe": level.timeframe,
+                "reference_level_price": level.price,
+                "approach_armed_at_ms": approach.armed_at_ms,
+                "trigger_15s_closed_at_ms": current.closed_at_ms,
+                "delta_notional": frame.delta_notional,
+                "delta_ratio": frame.delta_ratio,
+                "book_imbalance": frame.book_imbalance,
+                "microprice_mid_bp": frame.microprice_mid_bp,
+                "risk_bp": risk_bp,
+            }
+            candidates.append(_LaneCandidate(
+                setup_id, lane, symbol, side, True, current.closed_at_ms,
+                current.closed_at_ms + self.entry_ttl_ms, level, target_price, stop,
+                level.price, level.price, current.low if side is Side.LONG else current.high,
+                frame.delta_ratio + abs(frame.book_imbalance), features,
+            ))
+        if not candidates:
+            return self._reject(lane=lane, reason="no_orderflow_rejection", side=None, features={})
+        candidate = max(candidates, key=lambda item: item.score)
+        decision = self._resolve_candidate(candidate, frame)
+        if decision.signal is not None:
+            self._approaches.pop(candidate.target_level.level_id, None)
+            self._consumed_approaches.add(candidate.target_level.level_id)
+        return decision
+
+    def _failed_sweep_reclaim_legacy(
         self,
         symbol: str,
         now_ms: int,
@@ -979,6 +1169,92 @@ class StrategyV2Evaluator:
         return self._resolve_candidate(candidate, frame)
 
     def _terminal_level_breakout(
+        self,
+        symbol: str,
+        now_ms: int,
+        bars: Mapping[str, Sequence[Bar]],
+        levels: Sequence[Level],
+        frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        lane = LaneName.TERMINAL_LEVEL_BREAKOUT.value
+        if not self._data_quality_ok(frame):
+            return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
+        fifteen = bars.get("15s", ())
+        if len(fifteen) < 21 or frame.median_abs_delta_20 <= 0:
+            return self._reject(lane=lane, reason="warmup", side=None, features={})
+        current = fifteen[-1]
+        atr = _atr_1m(bars.get("1m", ()))
+        if atr is None:
+            return self._reject(lane=lane, reason="warmup", side=None, features={})
+        candidates: list[_LaneCandidate] = []
+        for approach in self._approached_levels(symbol, current, levels):
+            level = approach.level
+            buffer = self.reaction_buffer_ticks * self.tick_size
+            if level.side is LevelSide.HIGH:
+                side = Side.LONG
+                accepted = current.close >= level.price + buffer and frame.best_bid > level.price
+                flow = (
+                    frame.delta_notional >= frame.median_abs_delta_20
+                    and frame.microprice > frame.mid
+                    and frame.book_imbalance >= self.min_book_imbalance
+                    and frame.top5_bid_notional >= self.min_depth_notional_top5
+                )
+                entry = frame.best_bid
+                stop = min(current.low, level.price - buffer) - max(2 * self.tick_size, 0.1 * atr)
+            else:
+                side = Side.SHORT
+                accepted = current.close <= level.price - buffer and frame.best_ask < level.price
+                flow = (
+                    frame.delta_notional <= -frame.median_abs_delta_20
+                    and frame.microprice < frame.mid
+                    and frame.book_imbalance <= -self.min_book_imbalance
+                    and frame.top5_ask_notional >= self.min_depth_notional_top5
+                )
+                entry = frame.best_ask
+                stop = max(current.high, level.price + buffer) + max(2 * self.tick_size, 0.1 * atr)
+            if not accepted or not flow:
+                continue
+            risk_bp = _level_distance_bp(entry, stop)
+            if not self.min_risk_bp <= risk_bp <= self.max_risk_bp:
+                continue
+            reward_bp = self.terminal_reward_risk * risk_bp
+            obstacle = _nearest_target(
+                levels, symbol=symbol, side=side, price=entry, now_ms=now_ms,
+                timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True,
+            )
+            if obstacle is not None and obstacle.level_id != level.level_id and _level_distance_bp(entry, obstacle.price) < reward_bp:
+                continue
+            target_price = entry * (1 + reward_bp / 10_000) if side is Side.LONG else entry * (1 - reward_bp / 10_000)
+            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
+            features = {
+                "reaction_type": "orderflow_breakout",
+                "reference_level_id": level.level_id,
+                "reference_level_timeframe": level.timeframe,
+                "reference_level_price": level.price,
+                "approach_armed_at_ms": approach.armed_at_ms,
+                "trigger_15s_closed_at_ms": current.closed_at_ms,
+                "delta_notional": frame.delta_notional,
+                "delta_ratio": frame.delta_ratio,
+                "book_imbalance": frame.book_imbalance,
+                "microprice_mid_bp": frame.microprice_mid_bp,
+                "risk_bp": risk_bp,
+            }
+            candidates.append(_LaneCandidate(
+                setup_id, lane, symbol, side, True, current.closed_at_ms,
+                current.closed_at_ms + self.entry_ttl_ms, level, target_price, stop,
+                level.price, level.price, None,
+                frame.delta_ratio + abs(frame.book_imbalance), features,
+            ))
+        if not candidates:
+            return self._reject(lane=lane, reason="no_orderflow_breakout", side=None, features={})
+        candidate = max(candidates, key=lambda item: item.score)
+        decision = self._resolve_candidate(candidate, frame)
+        if decision.signal is not None:
+            self._approaches.pop(candidate.target_level.level_id, None)
+            self._consumed_approaches.add(candidate.target_level.level_id)
+        return decision
+
+    def _terminal_level_breakout_legacy(
         self,
         symbol: str,
         now_ms: int,

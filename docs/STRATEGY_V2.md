@@ -1,10 +1,10 @@
 # Strategy V2
 
-Frozen protocol version: v2.8.1, dated 2026-09-11. It retains one canonical
+Frozen protocol version: v2.9.0, dated 2026-09-12. It retains one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
-The executable scope is now restricted to direct level reactions; numerical
-strategy thresholds remain hypotheses and are unchanged.
+The executable scope is restricted to direct level reactions. The new approach
+zone and timeout are explicitly versioned hypotheses requiring forward data.
 
 ## Immutable provenance and sessions
 
@@ -12,15 +12,16 @@ strategy thresholds remain hypotheses and are unchanged.
 paper order, and evaluation session must be attributable to these immutable
 identifiers:
 
-- `strategy`: `v2.6.1-level-reaction-causal-guards`, direct level-reaction execution scope;
+- `strategy`: `v2.7.0-level-approach-orderflow`, causal approach and orderflow reaction scope;
 - `level`: the causal level lifecycle and geometry contract;
 - `universe`: `daily_universe_v2_shadow_metrics`, the once-daily UTC selector
   contract with recorded $50k liquidity diagnostics;
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.8.1` because executable strategy scope
-changed to direct level reactions while target eligibility, level lifecycle
+The top-level protocol version is `v2.9.0` because execution now arms when a
+completed 15s bar approaches a level and classifies the later reaction from
+15s footprint and current book evidence. Target eligibility and level lifecycle
 persistence, and the recorded metric/coverage contract remain causal. The
 metric and liquidity observations do not participate in trade eligibility.
 The `session_policy` binds a
@@ -144,22 +145,25 @@ Thresholds that are defined in `TRADING_RULES_V1.md` are reused directly:
 - 10 to 50 bp permitted risk band
 - 250 ms entry latency
 - 2 s entry TTL
-- 30 s sweep confirmation window
+- 20 bp or three-tick approach zone, whichever is wider
+- 120 s maximum approach observation window
 - 9.5 bp budgeted execution cost
 
 Anything not defined by v1 is treated as a predeclared conservative hypothesis.
 
 ## Lane Notes
 
-`failed_sweep_reclaim` is the primary lane. It arms only when a completed 1m
-candle pierces an active level and closes back across it. It then triggers only
-after a separate completed-15s/orderbook confirmation within 30 seconds,
-without trading back through the sweep extreme; 15s data cannot arm a sweep.
+`failed_sweep_reclaim` is the orderflow rejection lane. A completed 15s bar
+must first enter the approach zone from the valid side of an active level. A
+later completed 15s bar must pierce the level and close back across it while
+delta magnitude and the current book support the reversal direction.
 
 Executable entries are restricted to a direct reaction at an active horizontal
-level on completed 1m structure, with 15s/orderbook confirmation:
+level after a prior causal approach observation:
 `failed_sweep_reclaim` (sweep and reclaim) and `terminal_level_breakout`
-(confirmed close-through). `early_target_hunt` and `target_seeking_breakout`
+(15s acceptance beyond the level with directional orderflow). A reaction bar
+cannot arm and trigger the same approach. A consumed or expired approach can
+rearm only after price leaves the zone. `early_target_hunt` and `target_seeking_breakout`
 are preparation/legacy diagnostics and cannot arm or emit a paper signal.
 `structural_reaction`, `cascade_impulse`, and `fresh_extreme_momentum` remain
 shadow diagnostics only; none has an execution path.

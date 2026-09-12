@@ -22,33 +22,6 @@ from sniper_paper.strategy_v2 import (
 CENTER = 100.0
 
 
-@pytest.mark.parametrize("mirror", [False, True])
-@pytest.mark.parametrize("failure", ["close", "broken", "missing", "none"])
-def test_sweep_revalidates_confirmation_and_current_catalog(mirror, failure):
-    f = build_failed_sweep_fixture()
-    bars, levels = f["bars"], f["levels"]
-    arm, confirm = f["arm_frame"], f["confirm_frame"]
-    if failure == "close":
-        bars["15s"][-1] = replace(bars["15s"][-1], low=99.9, close=99.95)
-    if mirror:
-        bars = {tf: [mirror_bar(b) for b in rows] for tf, rows in bars.items()}
-        levels = [mirror_level(x) for x in levels]
-        arm, confirm = mirror_frame(arm), mirror_frame(confirm)
-    evaluator = StrategyV2Evaluator()
-    evaluator.evaluate(symbol="XUSDT", now_ms=f["arm_now"],
-                       bars={"1m": bars["1m"], "15s": bars["15s"][:-1]},
-                       levels=levels, orderflow=arm)
-    if failure == "broken":
-        levels = [replace(x, broken_at_ms=920_000) for x in levels]
-    elif failure == "missing":
-        levels = []
-    result = evaluator.evaluate(symbol="XUSDT", now_ms=f["confirm_now"],
-                                bars=bars, levels=levels, orderflow=confirm)[0]
-    assert (result.signal is not None) == (failure == "none")
-    if failure in {"broken", "missing"}:
-        assert result.reason == "reference_level_invalidated"
-
-
 @pytest.mark.parametrize("side", [Side.LONG, Side.SHORT])
 def test_breakout_current_quote_must_stay_beyond_reference(side):
     f = build_failed_sweep_fixture()
@@ -109,16 +82,13 @@ def mirror_bar(row: Bar) -> Bar:
 
 
 def mirror_level(level: Level) -> Level:
-    return Level(
-        f"{level.level_id}_m",
-        level.symbol,
-        level.timeframe,
-        LevelSide.LOW if level.side is LevelSide.HIGH else LevelSide.HIGH,
-        mirror_price(level.price),
-        level.confirmed_at_ms,
-        level.touches,
-        level.level_class,
-        level.origin_at_ms,
+    return replace(
+        level,
+        level_id=f"{level.level_id}_m",
+        side=LevelSide.LOW if level.side is LevelSide.HIGH else LevelSide.HIGH,
+        price=mirror_price(level.price),
+        zone_low=mirror_price(level.zone_high if level.zone_high is not None else level.price),
+        zone_high=mirror_price(level.zone_low if level.zone_low is not None else level.price),
     )
 
 
@@ -142,6 +112,127 @@ def mirror_frame(frame: OrderflowFrame) -> OrderflowFrame:
 
 def decision(decisions: list, lane: str):
     return next(item for item in decisions if item.lane == lane)
+
+
+def build_level_approach_fixture(kind: str, timeframe: str = "1m", mirrored: bool = False) -> dict:
+    baseline_15s = [bar(15_000, 900_000 + i * 15_000, 100.0, 100.08, 99.92, 100.0, 10) for i in range(20)]
+    bars_1m = [bar(60_000, i * 60_000, 100.0, 100.1, 99.9, 100.0, 10) for i in range(20)]
+    if kind == "breakout":
+        level = Level("resistance", "XUSDT", timeframe, LevelSide.HIGH, 100.0, 0,
+                      level_version=DIGASH_LEVEL_VERSION)
+        approach = bar(15_000, 1_200_000, 99.90, 99.98, 99.88, 99.95, 10)
+        reaction = bar(15_000, 1_215_000, 99.95, 100.12, 99.94, 100.08, 50)
+        frame = OrderflowFrame("XUSDT", 1_230_000, 100.07, 12, 100.08, 5, 50, 20, 18, 12,
+                               2_000, 1_000, 0.2, 10, 1)
+        lane = LaneName.TERMINAL_LEVEL_BREAKOUT.value
+    else:
+        level = Level("support", "XUSDT", timeframe, LevelSide.LOW, 100.0, 0,
+                      level_version=DIGASH_LEVEL_VERSION)
+        approach = bar(15_000, 1_200_000, 100.10, 100.12, 100.02, 100.05, 10)
+        reaction = bar(15_000, 1_215_000, 100.05, 100.10, 99.97, 100.06, -50)
+        frame = OrderflowFrame("XUSDT", 1_230_000, 100.05, 12, 100.06, 5, -50, 20, 13, 12,
+                               2_000, 1_000, 0.2, 10, 1)
+        lane = LaneName.FAILED_SWEEP_RECLAIM.value
+    bars = {"15s": [*baseline_15s, approach, reaction], "1m": bars_1m}
+    if mirrored:
+        bars = {tf: [mirror_bar(row) for row in rows] for tf, rows in bars.items()}
+        level = mirror_level(level)
+        frame = mirror_frame(frame)
+    return {"bars": bars, "level": level, "frame": frame, "lane": lane}
+
+
+@pytest.mark.parametrize("kind", ["breakout", "rejection"])
+@pytest.mark.parametrize("mirrored", [False, True])
+def test_level_approach_must_precede_orderflow_reaction(kind: str, mirrored: bool) -> None:
+    fixture = build_level_approach_fixture(kind, mirrored=mirrored)
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    arm_bars = {**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]}
+    arm_frame = replace(fixture["frame"], received_at_ms=1_215_000)
+    arm = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
+                                      levels=[fixture["level"]], orderflow=arm_frame), fixture["lane"])
+    triggered = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                                            levels=[fixture["level"]], orderflow=fixture["frame"]), fixture["lane"])
+    direct = decision(StrategyV2Evaluator(min_book_imbalance=0.01).evaluate(
+        symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"], levels=[fixture["level"]],
+        orderflow=fixture["frame"]), fixture["lane"])
+    assert arm.signal is None
+    assert triggered.status == DecisionStatus.TRIGGERED.value
+    assert triggered.features["approach_armed_at_ms"] == 1_215_000
+    assert triggered.features["trigger_15s_closed_at_ms"] == 1_230_000
+    assert direct.signal is None
+    assert evaluator.active_approaches() == []
+
+
+def test_stale_book_can_arm_approach_but_cannot_trigger() -> None:
+    fixture = build_level_approach_fixture("breakout")
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    arm_bars = {**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]}
+    stale = replace(fixture["frame"], received_at_ms=1_215_000, book_age_ms=1_000)
+    armed = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
+                                        levels=[fixture["level"]], orderflow=stale), fixture["lane"])
+    assert armed.signal is None
+    assert armed.reason == "data_quality"
+    assert evaluator.active_approaches()[0]["level_id"] == fixture["level"].level_id
+    triggered = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                                            levels=[fixture["level"]], orderflow=fixture["frame"]), fixture["lane"])
+    assert triggered.status == DecisionStatus.TRIGGERED.value
+
+
+def test_consumed_or_expired_approach_requires_departure_before_rearm() -> None:
+    fixture = build_level_approach_fixture("rejection")
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    arm_bars = {**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]}
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
+                       levels=[fixture["level"]],
+                       orderflow=replace(fixture["frame"], received_at_ms=1_215_000))
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                       levels=[fixture["level"]], orderflow=fixture["frame"])
+    assert evaluator.active_approaches() == []
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_245_000, bars=fixture["bars"],
+                       levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_245_000))
+    assert evaluator.active_approaches() == []
+
+    departed = bar(15_000, 1_230_000, 100.06, 100.55, 100.05, 100.50, 5)
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_245_000,
+                       bars={**fixture["bars"], "15s": [*fixture["bars"]["15s"], departed]},
+                       levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_245_000))
+    returned = bar(15_000, 1_245_000, 100.50, 100.52, 100.02, 100.05, 5)
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_260_000,
+                       bars={**fixture["bars"], "15s": [*fixture["bars"]["15s"], departed, returned]},
+                       levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_260_000))
+    assert evaluator.active_approaches()[0]["level_id"] == fixture["level"].level_id
+
+
+@pytest.mark.parametrize("kind", ["breakout", "rejection"])
+def test_orderflow_reaction_rejects_weak_flow_and_invalidated_level(kind: str) -> None:
+    fixture = build_level_approach_fixture(kind)
+    arm_bars = {**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]}
+    weak = StrategyV2Evaluator(min_book_imbalance=0.01)
+    arm_frame = replace(fixture["frame"], received_at_ms=1_215_000)
+    weak.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
+                  levels=[fixture["level"]], orderflow=arm_frame)
+    weak_frame = replace(fixture["frame"], delta_notional=1)
+    assert decision(weak.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                                  levels=[fixture["level"]], orderflow=weak_frame), fixture["lane"]).signal is None
+    invalidated = StrategyV2Evaluator(min_book_imbalance=0.01)
+    invalidated.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
+                         levels=[fixture["level"]], orderflow=arm_frame)
+    broken = replace(fixture["level"], broken_at_ms=1_220_000)
+    assert decision(invalidated.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                                         levels=[broken], orderflow=fixture["frame"]), fixture["lane"]).signal is None
+
+
+@pytest.mark.parametrize("timeframe", sorted(DIGASH_LEVEL_TIMEFRAMES))
+def test_orderflow_breakout_accepts_every_runtime_level_timeframe(timeframe: str) -> None:
+    fixture = build_level_approach_fixture("breakout", timeframe=timeframe)
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000,
+                       bars={**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]},
+                       levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_215_000))
+    result = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
+                                         levels=[fixture["level"]], orderflow=fixture["frame"]), fixture["lane"])
+    assert result.status == DecisionStatus.TRIGGERED.value
+    assert result.target_level.timeframe == timeframe
 
 
 def trigger_candidate(side: Side, risk_bp: float, lane: str = LaneName.TERMINAL_LEVEL_BREAKOUT.value) -> _LaneCandidate:
@@ -452,125 +543,6 @@ def test_nearest_target_can_reference_level_active_before_trigger_break() -> Non
     ) is None
 
 
-def test_terminal_lane_can_trade_the_first_break_but_not_reuse_the_level() -> None:
-    bars = {
-        "1m": [
-            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
-            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
-        ],
-        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
-    }
-    levels = [
-        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
-        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
-    ]
-    frame = OrderflowFrame(
-        symbol="XUSDT",
-        received_at_ms=120_000,
-        best_bid=100.90,
-        best_bid_size=10.0,
-        best_ask=100.91,
-        best_ask_size=5.0,
-        delta_notional=20.0,
-        median_abs_delta_20=5.0,
-        range_bp=20.0,
-        median_range_bp_20=10.0,
-        top5_bid_notional=2_000.0,
-        top5_ask_notional=1_000.0,
-        atr_1m=0.5,
-        book_age_ms=10,
-        spread_bp=1.0,
-    )
-    evaluator = StrategyV2Evaluator(min_risk_bp=1.0, max_risk_bp=200.0)
-
-    first = decision(
-        evaluator.evaluate(symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame),
-        LaneName.TERMINAL_LEVEL_BREAKOUT.value,
-    )
-    later = decision(
-        StrategyV2Evaluator(min_risk_bp=1.0, max_risk_bp=200.0).evaluate(
-            symbol="XUSDT",
-            now_ms=180_000,
-            bars=bars,
-            levels=levels,
-            orderflow=replace(frame, received_at_ms=180_000),
-        ),
-        LaneName.TERMINAL_LEVEL_BREAKOUT.value,
-    )
-
-    assert first.status == DecisionStatus.TRIGGERED.value
-    assert first.target_level is not None
-    assert first.target_level.level_class == "cluster"
-    assert first.features["reaction_type"] == "confirmed_breakout"
-    assert first.features["reference_level_id"] == first.target_level.level_id
-    assert first.features["reference_level_timeframe"] == first.target_level.timeframe
-    assert first.features["reference_level_price"] == pytest.approx(first.target_level.price)
-    assert first.features["trigger_1m_closed_at_ms"] == 120_000
-    assert later.status == DecisionStatus.REJECTED.value
-
-
-@pytest.mark.parametrize("timeframe", sorted(DIGASH_LEVEL_TIMEFRAMES))
-def test_terminal_break_accepts_reference_level_from_every_runtime_timeframe(timeframe: str) -> None:
-    bars = {
-        "1m": [
-            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
-            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
-        ],
-        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
-    }
-    levels = [
-        Level("a", "XUSDT", timeframe, LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000, level_version=DIGASH_LEVEL_VERSION),
-        Level("b", "XUSDT", timeframe, LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000, level_version=DIGASH_LEVEL_VERSION),
-    ]
-    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 20, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
-    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
-        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
-    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
-    assert result.status == DecisionStatus.TRIGGERED.value
-    assert result.target_level is not None
-    assert result.target_level.timeframe == timeframe
-
-
-def test_terminal_break_requires_15s_and_orderflow_confirmation() -> None:
-    bars = {
-        "1m": [
-            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
-            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
-        ],
-        "15s": [bar(15_000, 105_000, 100.8, 101.0, 100.7, 100.95, 20.0)],
-    }
-    levels = [
-        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
-        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
-    ]
-    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 0.1, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
-    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
-        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
-    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
-    assert result.signal is None
-    assert result.reason == "no_orderflow_confirmation"
-
-
-def test_terminal_break_rejects_15s_reclaim_back_under_reference_level() -> None:
-    bars = {
-        "1m": [
-            bar(60_000, 0, 100.0, 100.2, 99.8, 100.0, 10.0),
-            bar(60_000, 60_000, 100.0, 101.2, 99.9, 101.0, 20.0),
-        ],
-        "15s": [bar(15_000, 105_000, 100.8, 100.9, 100.4, 100.5, 20.0)],
-    }
-    levels = [
-        Level("a", "XUSDT", "15m", LevelSide.HIGH, 100.80, 0, broken_at_ms=120_000),
-        Level("b", "XUSDT", "15m", LevelSide.HIGH, 100.81, 0, broken_at_ms=120_000),
-    ]
-    frame = OrderflowFrame("XUSDT", 120_000, 100.90, 10, 100.91, 5, 100, 5, 20, 10, 2_000, 1_000, .5, 10, 1)
-    result = decision(StrategyV2Evaluator(min_risk_bp=1, max_risk_bp=200).evaluate(
-        symbol="XUSDT", now_ms=120_000, bars=bars, levels=levels, orderflow=frame
-    ), LaneName.TERMINAL_LEVEL_BREAKOUT.value)
-    assert result.signal is None
-    assert result.reason == "no_15s_confirmation"
-
-
 def test_trigger_rejects_reference_level_broken_before_arm() -> None:
     evaluator = StrategyV2Evaluator()
     candidate = trigger_candidate(Side.LONG, 20.0)
@@ -598,19 +570,6 @@ def test_non_executable_impulse_lanes_never_emit_signals() -> None:
         assert result.reason == "diagnostic_only"
 
 
-def test_sweep_15s_without_completed_1m_reclaim_cannot_arm() -> None:
-    fixture = build_failed_sweep_fixture()
-    bars_1m = [*fixture["bars"]["1m"]]
-    bars_1m[-1] = bar(60_000, 840_000, 100.30, 100.36, 100.02, 100.05, -80.0)
-    result = decision(StrategyV2Evaluator(min_book_imbalance=0.01).evaluate(
-        symbol="XUSDT", now_ms=fixture["arm_now"],
-        bars={"15s": fixture["bars"]["15s"][:-1], "1m": bars_1m},
-        levels=fixture["levels"], orderflow=fixture["arm_frame"]
-    ), LaneName.FAILED_SWEEP_RECLAIM.value)
-    assert result.signal is None
-    assert result.reason == "no_sweep_setup"
-
-
 def test_cascade_geometry_records_ordered_distinct_levels_without_a_hidden_gate() -> None:
     levels = [
         Level("near", "XUSDT", "4h", LevelSide.HIGH, 101.0, 0),
@@ -625,175 +584,6 @@ def test_cascade_geometry_records_ordered_distinct_levels_without_a_hidden_gate(
     assert result["cascade_first_level_id"] == "near"
     assert result["cascade_last_level_id"] == "far"
     assert result["cascade_total_span_bp"] == pytest.approx((103 / 101 - 1) * 10_000)
-
-
-def test_failed_sweep_lane_cannot_reuse_broken_structural_level() -> None:
-    fixture = build_failed_sweep_fixture()
-    broken_levels = [replace(fixture["levels"][0], broken_at_ms=900_000)]
-    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
-
-    result = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=fixture["arm_now"],
-            bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
-            levels=broken_levels,
-            orderflow=fixture["arm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-
-    assert result.status == DecisionStatus.REJECTED.value
-    assert result.reason == "no_sweep_setup"
-
-
-def test_failed_sweep_is_symmetric() -> None:
-    long_fixture = build_failed_sweep_fixture()
-    short_fixture = {
-        "bars": {
-            key: [mirror_bar(row) for row in value]
-            for key, value in long_fixture["bars"].items()
-        },
-        "levels": [mirror_level(item) for item in long_fixture["levels"]],
-        "arm_frame": mirror_frame(long_fixture["arm_frame"]),
-        "confirm_frame": mirror_frame(long_fixture["confirm_frame"]),
-        "arm_now": long_fixture["arm_now"],
-        "confirm_now": long_fixture["confirm_now"],
-    }
-    long_eval = StrategyV2Evaluator(min_book_imbalance=0.01)
-    short_eval = StrategyV2Evaluator(min_book_imbalance=0.01)
-    long_eval.evaluate(
-        symbol="XUSDT",
-        now_ms=long_fixture["arm_now"],
-        bars={"15s": long_fixture["bars"]["15s"][:-1], "1m": long_fixture["bars"]["1m"]},
-        levels=long_fixture["levels"],
-        orderflow=long_fixture["arm_frame"],
-    )
-    short_eval.evaluate(
-        symbol="XUSDT",
-        now_ms=short_fixture["arm_now"],
-        bars={"15s": short_fixture["bars"]["15s"][:-1], "1m": short_fixture["bars"]["1m"]},
-        levels=short_fixture["levels"],
-        orderflow=short_fixture["arm_frame"],
-    )
-    long_decision = decision(
-        long_eval.evaluate(
-            symbol="XUSDT",
-            now_ms=long_fixture["confirm_now"],
-            bars=long_fixture["bars"],
-            levels=long_fixture["levels"],
-            orderflow=long_fixture["confirm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    short_decision = decision(
-        short_eval.evaluate(
-            symbol="XUSDT",
-            now_ms=short_fixture["confirm_now"],
-            bars=short_fixture["bars"],
-            levels=short_fixture["levels"],
-            orderflow=short_fixture["confirm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    assert long_decision.status == DecisionStatus.TRIGGERED.value
-    assert short_decision.status == DecisionStatus.TRIGGERED.value
-    assert long_decision.side is Side.LONG
-    assert short_decision.side is Side.SHORT
-    assert mirror_price(long_decision.stop_price) == pytest.approx(short_decision.stop_price)
-    assert mirror_price(long_decision.target_price) == pytest.approx(short_decision.target_price)
-
-
-def test_failed_sweep_confirmation_uses_delta_baseline_frozen_at_arm() -> None:
-    fixture = build_failed_sweep_fixture()
-    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
-    evaluator.evaluate(
-        symbol="XUSDT",
-        now_ms=fixture["arm_now"],
-        bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
-        levels=fixture["levels"],
-        orderflow=fixture["arm_frame"],
-    )
-    changed_baseline = replace(fixture["confirm_frame"], median_abs_delta_20=1_000.0)
-
-    result = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=fixture["confirm_now"],
-            bars=fixture["bars"],
-            levels=fixture["levels"],
-            orderflow=changed_baseline,
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-
-    assert result.status == DecisionStatus.TRIGGERED.value
-    assert result.features["confirmation_frozen_delta_baseline"] == 20.0
-
-
-def test_one_attempt_turns_repeat_into_missed() -> None:
-    fixture = build_failed_sweep_fixture()
-    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
-    evaluator.evaluate(
-        symbol="XUSDT",
-        now_ms=fixture["arm_now"],
-        bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
-        levels=fixture["levels"],
-        orderflow=fixture["arm_frame"],
-    )
-    first = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=fixture["confirm_now"],
-            bars=fixture["bars"],
-            levels=fixture["levels"],
-            orderflow=fixture["confirm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    repeat = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=fixture["confirm_now"],
-            bars=fixture["bars"],
-            levels=fixture["levels"],
-            orderflow=fixture["confirm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    assert first.status == DecisionStatus.TRIGGERED.value
-    assert repeat.status == DecisionStatus.MISSED.value
-    assert repeat.reason == "setup_already_attempted"
-
-
-def test_pending_setup_expires_to_missed() -> None:
-    fixture = build_failed_sweep_fixture()
-    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
-    armed = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=fixture["arm_now"],
-            bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
-            levels=fixture["levels"],
-            orderflow=fixture["arm_frame"],
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    stale_frame = replace(fixture["arm_frame"], received_at_ms=950_000)
-    missed = decision(
-        evaluator.evaluate(
-            symbol="XUSDT",
-            now_ms=950_000,
-            bars={"15s": fixture["bars"]["15s"][:-1], "1m": fixture["bars"]["1m"]},
-            levels=fixture["levels"],
-            orderflow=stale_frame,
-        ),
-        LaneName.FAILED_SWEEP_RECLAIM.value,
-    )
-    assert armed.status == DecisionStatus.REJECTED.value
-    assert armed.reason == "armed_pending_confirmation"
-    assert missed.status == DecisionStatus.MISSED.value
-    assert missed.reason == "setup_expired"
 
 
 def test_lane_separation_keeps_diagnostic_lanes_non_trading() -> None:

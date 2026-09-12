@@ -1,9 +1,9 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.8.1",
+  "version": "v2.9.0",
   "status": "frozen_spec",
   "versions": {
-    "strategy": "v2.6.1-level-reaction-causal-guards",
+    "strategy": "v2.7.0-level-approach-orderflow",
     "level": "digash_horizontal_levels_v3_touch_episodes",
     "universe": "daily_universe_v2_shadow_metrics",
     "execution": "paper_execution_v2_dust_guard_relative_epsilon",
@@ -54,8 +54,9 @@
     "legacy_15m_4h_runtime_allowed": false
   },
   "level_reaction_execution_policy": {
-    "trigger_timeframe": "1m",
-    "confirmation_timeframe": "15s",
+    "context_timeframe": "1m",
+    "approach_timeframe": "15s",
+    "reaction_timeframe": "15s",
     "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
     "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
     "orderflow_required": true,
@@ -63,6 +64,7 @@
     "sweep_confirmation_close_must_reclaim_level": true,
     "pending_reference_revalidated_at_confirmation": true,
     "minute_completion_retries_boundary_footprint": true,
+    "approach_must_precede_reaction": true,
     "non_reaction_lanes": "diagnostic_only"
   },
   "shadow_diagnostics_policy": {
@@ -148,7 +150,11 @@
       "structure_reclaim_bp": 1.0,
       "cascade_min_body_to_range": 0.6,
       "cascade_min_delta_ratio": 2.0,
-      "fresh_extreme_lookback_4h": 6
+      "fresh_extreme_lookback_4h": 6,
+      "approach_zone_bp": 20.0,
+      "approach_min_ticks": 3,
+      "approach_timeout_ms": 120000,
+      "reaction_buffer_ticks": 1
     },
     "shadow": {
       "retest_tolerance_ticks": 1,
@@ -183,7 +189,7 @@
       "direction": "both",
       "attempts_per_setup": 1,
       "diagnostic": false,
-      "confirmation_timeout_ms": 30000,
+      "confirmation_timeout_ms": 120000,
       "cooldown_ms": 60000
     },
     {
@@ -201,7 +207,7 @@
       "direction": "both",
       "attempts_per_setup": 1,
       "diagnostic": false,
-      "confirmation_timeout_ms": 2000,
+      "confirmation_timeout_ms": 120000,
       "cooldown_ms": 60000
     },
     {

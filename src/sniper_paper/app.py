@@ -697,7 +697,11 @@ class PaperApp:
             if blocker != state.last_blocker:
                 self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", blocker, {"symbol": state.symbol})
                 state.last_blocker = blocker
-            return
+            # Proximity to a level is price-derived and may be armed even when
+            # the latest book update is stale. The evaluator's own data-quality
+            # gate prevents a stale/spread frame from producing a signal.
+            if blocker != "book_stale_or_spread":
+                return
         state.last_blocker = None
         levels = list(state.levels)
         decisions = self.strategies[state.symbol].evaluate(
@@ -707,6 +711,9 @@ class PaperApp:
             levels=levels,
             orderflow=orderflow,
         )
+        state.last_orderflow["level_approaches"] = self.strategies[state.symbol].active_approaches()
+        if blocker:
+            return
         price = state.bars["15s"][-1].close
         for decision in decisions:
             if decision.signal is not None or decision.status == "MISSED" or decision.setup_id is not None:
