@@ -1,5 +1,25 @@
 # sniper-paper operational handoff
 
+## Release v2.9.0 — approach-first orderflow reactions (2026-09-12)
+
+- The 1m chart and causal Digash level catalogue remain the structural context.
+  A completed 15s bar must enter the approach zone before a later 15s bar can
+  classify an executable reaction.
+- The frozen approach zone is 20 bp or three instrument ticks, whichever is
+  wider. Observation expires after 120 seconds. A consumed or expired level
+  cannot rearm until price leaves the zone.
+- Breakout requires a completed 15s close at least one tick through the level,
+  a current executable quote beyond it, directional delta at least its 20-frame
+  median magnitude, directional microprice/top-5 imbalance and sufficient
+  depth. Rejection requires a pierce and close back, strong absolute delta and
+  book evidence in the reversal direction. Rules are symmetric for support and
+  resistance.
+- Stale-book frames may arm price proximity but cannot trigger a signal.
+  Observation-only sessions maintain approach state and persist confirmed
+  reactions to shadow diagnostics without calling paper execution.
+- These thresholds are forward hypotheses. Paper entry remains the existing
+  conservative post-only queue model and is a separate next-stage question.
+
 ## Release v2.8.0 — level-reaction-only entries (2026-09-11)
 
 - Paper entries are now restricted to direct reactions at a concrete active
@@ -34,7 +54,7 @@
   remain unpublished. These choices are explicitly versioned hypotheses.
 - Deployment verification is recorded below after rollout.
 
-Last updated: 2026-09-11 (Europe/Kyiv)
+Last updated: 2026-09-12 (Europe/Kyiv)
 
 ## Safety boundary
 
@@ -130,6 +150,21 @@ signal paths as `UNKNOWN`. Treat reconnect frequency as an independent data
 quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
+
+- Deployed code commit: `00795b9`, protocol v2.9.0, 2026-09-12 14:11 UTC.
+- Protocol hash:
+  `ddb4a8a67ffa401644f0ffcb1ee5ef099741fd2e499a3d8996c56eec24418713`.
+- Consistent pre-release backup:
+  `runtime/paper.db.pre-v2.9.0-20260912T140640Z` (`quick_check=ok`, schema 7).
+- Local Ruff, 204 tests, Docker build and image initialization passed.
+  Post-deploy: HTTP 200 after startup, container healthy, restart count 0,
+  OOM false, WebSocket connected, 9/9 books ready and live SQLite
+  `quick_check=ok`. The market API exposes `orderflow.level_approaches`.
+- No position or pending order was open at either restart. Because the protocol
+  changed mid-day, September 12 is observation-only; eligible forward paper
+  execution starts after the September 13 UTC selection and warmup.
+
+## Previous deployment v2.8.1
 
 - Deployed code commit: `6105779`, protocol v2.8.1, 2026-09-11 19:04 UTC.
 - Fixes four audited defects: deferred evaluation when a boundary footprint
