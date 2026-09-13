@@ -34,6 +34,7 @@ from .strategy import (
     current_display_levels,
 )
 from .strategy_v2 import (
+    DecisionStatus,
     OrderflowFrame,
     StrategyV2Evaluator,
 )
@@ -428,6 +429,10 @@ class PaperApp:
             if state == "disconnected":
                 self.stream_connected = False
                 for symbol_state in self.states.values():
+                    evaluator = self.strategies.get(symbol_state.symbol)
+                    if evaluator is not None and hasattr(evaluator, "reset_level_episodes"):
+                        evaluator.reset_level_episodes(received_at_ms, "market_stream_disconnected")
+                        self._record_level_episode_events(evaluator)
                     symbol_state.book.invalidate()
                     symbol_state.snapshot_received_at_ms = None
                     for builder in symbol_state.builders.values():
@@ -457,6 +462,10 @@ class PaperApp:
             try:
                 state.book.apply(message, received_at_ms)
                 if message.get("type") == "snapshot" or message.get("data", {}).get("u") == 1:
+                    evaluator = self.strategies.get(symbol)
+                    if evaluator is not None and hasattr(evaluator, "reset_level_episodes"):
+                        evaluator.reset_level_episodes(received_at_ms, "book_snapshot_reset")
+                        self._record_level_episode_events(evaluator)
                     state.snapshot_received_at_ms = received_at_ms
                     state.boundary_footprint = None
                     state.density_walls.clear()
@@ -470,6 +479,7 @@ class PaperApp:
                     self._update_density_walls(state, dom_events)
                     state.last_dom_events = [*state.last_dom_events, *dom_events][-20:]
                 quote = self._quote(state, received_at_ms)
+                self._observe_level_price(state, received_at_ms, (quote.bid + quote.ask) / 2, "orderbook_mid")
                 # Observe the closing quote before baseline execution mutates
                 # executor.position; this preserves shadow continuity.
                 self._observe_profit_protection(symbol, quote)
@@ -493,6 +503,16 @@ class PaperApp:
             for row in message.get("data", []):
                 await self._trade(row, received_at_ms)
                 symbol = str(row.get("s", ""))
+                state = self.states.get(symbol)
+                if state is not None:
+                    self._observe_level_price(
+                        state,
+                        received_at_ms,
+                        float(row.get("p", 0)),
+                        "public_trade",
+                        trade_side=str(row.get("S", "")),
+                        quantity=float(row.get("v", 0)),
+                    )
                 self._observe_signal_paths(symbol, received_at_ms, float(row.get("p", 0)))
                 execution = self.executor.on_trade(
                     symbol,
@@ -580,6 +600,10 @@ class PaperApp:
         self.journal.record_bar("15s", bar, "public_trade_footprint")
         state.orderflow_ready = not bool(footprint.get("incomplete") or footprint.get("partial"))
         if not state.orderflow_ready:
+            evaluator = self.strategies.get(symbol)
+            if evaluator is not None and hasattr(evaluator, "reset_level_episodes"):
+                evaluator.reset_level_episodes(bar.closed_at_ms, "orderflow_incomplete")
+                self._record_level_episode_events(evaluator)
             state.last_orderflow = {
                 "delta_15s": bar.delta_notional,
                 "footprint_stack": 0,
@@ -631,9 +655,19 @@ class PaperApp:
             if state.snapshot_received_at_ms is None
             else max(0, state.snapshot_received_at_ms + self.warmup_ms - now_ms)
         )
-        book_ready = state.book.healthy(
-            now_ms, self.max_book_age_ms, float(self.protocol_data["parameters"]["universe"]["max_spread_bps"])
-        )
+        max_spread_bp = float(self.protocol_data["parameters"]["universe"]["max_spread_bps"])
+        book_age_ms = None if state.book.received_at_ms is None else max(0, now_ms - state.book.received_at_ms)
+        spread_bp = None
+        if state.book.ready:
+            spread_bp = (state.book.best_ask / state.book.best_bid - 1) * 10_000
+        book_stale = book_age_ms is None or book_age_ms > self.max_book_age_ms
+        spread_too_wide = spread_bp is None or spread_bp > max_spread_bp
+        book_ready = state.book.ready and not book_stale and not spread_too_wide
+        data_quality_blockers = [
+            name
+            for name, blocked in (("book_stale", book_stale), ("spread_too_wide", spread_too_wide))
+            if blocked
+        ]
         blocker = None
         if not self.evaluation_eligible:
             blocker = "partial_day_observation_only"
@@ -643,8 +677,12 @@ class PaperApp:
             blocker = "book_snapshot_required"
         elif warmup_remaining > 0:
             blocker = "post_snapshot_warmup"
-        elif not book_ready:
-            blocker = "book_stale_or_spread"
+        elif book_stale and spread_too_wide:
+            blocker = "book_stale_and_spread_too_wide"
+        elif book_stale:
+            blocker = "book_stale"
+        elif spread_too_wide:
+            blocker = "spread_too_wide"
         elif not state.orderflow_ready:
             blocker = "orderflow_incomplete"
         return {
@@ -653,9 +691,69 @@ class PaperApp:
             "gap_free": state.book.ready and state.snapshot_received_at_ms is not None and state.orderflow_ready,
             "warmup_remaining_s": math.ceil(warmup_remaining / 1000),
             "book_ready": book_ready,
+            "book_age_ms": book_age_ms,
+            "max_book_age_ms": self.max_book_age_ms,
+            "spread_bp": spread_bp,
+            "max_spread_bp": max_spread_bp,
+            "data_quality_blockers": data_quality_blockers,
             "blocker": blocker,
             "ready": blocker is None,
         }
+
+    def _observe_level_price(
+        self,
+        state: SymbolState,
+        now_ms: int,
+        price: float,
+        source: str,
+        *,
+        trade_side: str | None = None,
+        quantity: float = 0.0,
+    ) -> None:
+        evaluator = self.strategies.get(state.symbol)
+        if evaluator is None or not hasattr(evaluator, "observe_price"):
+            return
+        evaluator.observe_price(
+            symbol=state.symbol,
+            now_ms=now_ms,
+            price=price,
+            levels=state.levels,
+            source=source,
+            trade_side=trade_side,
+            quantity=quantity,
+        )
+        self._record_level_episode_events(evaluator)
+
+    def _record_level_episode_events(self, evaluator: StrategyV2Evaluator) -> None:
+        statuses = {
+            "ARMED": "ARMED",
+            "CROSSED": "ARMED",
+            "SIGNAL": "CONFIRMED",
+            "DEPARTED": "EXPIRED",
+            "INVALIDATED": "INVALIDATED",
+            "UNKNOWN": "INVALIDATED",
+        }
+        drain = getattr(evaluator, "drain_episode_events", None)
+        if drain is None:
+            return
+        for event in drain():
+            self._record_shadow(
+                {
+                    "diagnostic_id": event["event_id"],
+                    "setup_id": event["episode_id"],
+                    "occurred_at_ms": event["occurred_at_ms"],
+                    "symbol": event["symbol"],
+                    "lane": "level_reaction_episode",
+                    "side": None,
+                    "status": statuses[str(event["event_type"])],
+                    "reason": event["reason"],
+                    "reference_price": event["level_price"],
+                    "stop_price": None,
+                    "target_price": None,
+                    "protocol_hash": self.protocol_hash,
+                    "features": dict(event),
+                }
+            )
 
     def _evaluate_v2(self, state: SymbolState, footprint: dict[str, Any], now_ms: int) -> None:
         prior = state.bars["15s"][-21:-1]
@@ -695,14 +793,33 @@ class PaperApp:
         blocker = readiness["blocker"]
         if blocker:
             if blocker != state.last_blocker:
-                self.journal.event(now_ms, "INFO", "SIGNAL_BLOCK", blocker, {"symbol": state.symbol})
+                self.journal.event(
+                    now_ms,
+                    "INFO",
+                    "SIGNAL_BLOCK",
+                    blocker,
+                    {
+                        "symbol": state.symbol,
+                        "book_age_ms": readiness["book_age_ms"],
+                        "max_book_age_ms": readiness["max_book_age_ms"],
+                        "spread_bp": readiness["spread_bp"],
+                        "max_spread_bp": readiness["max_spread_bp"],
+                        "data_quality_blockers": readiness["data_quality_blockers"],
+                    },
+                )
                 state.last_blocker = blocker
             # Proximity to a level is price-derived and may be armed even when
             # the latest book update is stale. The evaluator's own data-quality
             # gate prevents a stale/spread frame from producing a signal.
-            if blocker not in {"book_stale_or_spread", "partial_day_observation_only"}:
+            if blocker not in {
+                "book_stale",
+                "spread_too_wide",
+                "book_stale_and_spread_too_wide",
+                "partial_day_observation_only",
+            }:
                 return
-        state.last_blocker = None
+        if blocker is None:
+            state.last_blocker = None
         levels = list(state.levels)
         decisions = self.strategies[state.symbol].evaluate(
             symbol=state.symbol,
@@ -711,6 +828,7 @@ class PaperApp:
             levels=levels,
             orderflow=orderflow,
         )
+        self._record_level_episode_events(self.strategies[state.symbol])
         state.last_orderflow["level_approaches"] = self.strategies[state.symbol].active_approaches()
         if blocker:
             if blocker == "partial_day_observation_only":
@@ -733,6 +851,32 @@ class PaperApp:
                             "target_price": decision.signal.target_price,
                             "protocol_hash": self.protocol_hash,
                             "features": {**dict(decision.features), "evaluation_eligible": "false"},
+                        }
+                    )
+            else:
+                for decision in decisions:
+                    if decision.status != DecisionStatus.BLOCKED.value or decision.setup_id is None:
+                        continue
+                    reference = decision.target_level
+                    self._record_shadow(
+                        {
+                            "diagnostic_id": f"{decision.setup_id}:{decision.reason}",
+                            "setup_id": decision.setup_id,
+                            "occurred_at_ms": now_ms,
+                            "symbol": state.symbol,
+                            "lane": decision.lane,
+                            "side": None if decision.side is None else decision.side.value,
+                            "status": "BLOCKED",
+                            "reason": decision.reason,
+                            "reference_price": None if reference is None else reference.price,
+                            "stop_price": decision.stop_price,
+                            "target_price": decision.target_price,
+                            "protocol_hash": self.protocol_hash,
+                            "features": {
+                                **dict(decision.features),
+                                "execution_eligible": "false",
+                                "not_a_fill": "true",
+                            },
                         }
                     )
             return

@@ -1,9 +1,9 @@
 {
   "name": "paper_strategy_v2",
-  "version": "v2.9.0",
+  "version": "v2.10.0",
   "status": "frozen_spec",
   "versions": {
-    "strategy": "v2.7.0-level-approach-orderflow",
+    "strategy": "v2.8.0-live-level-episode-orderflow",
     "level": "digash_horizontal_levels_v3_touch_episodes",
     "universe": "daily_universe_v2_shadow_metrics",
     "execution": "paper_execution_v2_dust_guard_relative_epsilon",
@@ -55,8 +55,14 @@
   },
   "level_reaction_execution_policy": {
     "context_timeframe": "1m",
-    "approach_timeframe": "15s",
-    "reaction_timeframe": "15s",
+    "confirmation_timeframe": "15s",
+    "episode_lane": "level_reaction_episode",
+    "episode_start": "live_trade_or_book_midpoint_near_level",
+    "episode_timeout_ms": null,
+    "far_departure_bp": 60.0,
+    "termination_reasons": ["SIGNAL", "FAR_DEPARTURE", "LEVEL_INVALIDATION", "DATA_CONTINUITY_RESET"],
+    "cross_requires_public_trade_or_completed_footprint": true,
+    "arming_trade_excluded_from_post_arm_delta": true,
     "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
     "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
     "orderflow_required": true,
@@ -71,7 +77,7 @@
     "enabled": true,
     "execution_link_allowed": false,
     "persist_separately_from_signals": true,
-    "lanes": ["retest_reclaim_v1", "density_bounce_v1", "cascade_terminal_exit"]
+    "lanes": ["retest_reclaim_v1", "density_bounce_v1", "cascade_terminal_exit", "level_reaction_episode"]
   },
   "metrics_observation_policy": {
     "trade_gate_enabled": false,
@@ -153,7 +159,8 @@
       "fresh_extreme_lookback_4h": 6,
       "approach_zone_bp": 20.0,
       "approach_min_ticks": 3,
-      "approach_timeout_ms": 120000,
+      "approach_departure_bp": 60.0,
+      "breakout_confirm_closes": 1,
       "reaction_buffer_ticks": 1
     },
     "shadow": {
@@ -189,7 +196,6 @@
       "direction": "both",
       "attempts_per_setup": 1,
       "diagnostic": false,
-      "confirmation_timeout_ms": 120000,
       "cooldown_ms": 60000
     },
     {
@@ -207,7 +213,6 @@
       "direction": "both",
       "attempts_per_setup": 1,
       "diagnostic": false,
-      "confirmation_timeout_ms": 120000,
       "cooldown_ms": 60000
     },
     {
@@ -266,6 +271,6 @@
   "unvalidated_hypotheses": [
     "early_target_hunt, target_seeking_breakout, structural_reaction, cascade_impulse, and fresh_extreme_momentum are diagnostics only and have no execution path.",
     "dom_confirmed_breakout and diagonal_context are diagnostic and must never emit tradable signals.",
-    "retest_reclaim_v1, density_bounce_v1, and cascade_terminal_exit persist only to shadow_diagnostics and have no execution path."
+    "retest_reclaim_v1, density_bounce_v1, cascade_terminal_exit, and level_reaction_episode persist only to shadow_diagnostics and have no independent execution path."
   ]
 }

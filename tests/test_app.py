@@ -424,6 +424,31 @@ def test_market_detail_readiness_requires_every_gate(tmp_path: Path, monkeypatch
     assert blocked["blocker"] == "orderflow_incomplete"
 
 
+def test_readiness_reports_stale_book_and_wide_spread_separately(tmp_path: Path) -> None:
+    app = PaperApp(Journal(tmp_path / "paper.db"))
+    state = SymbolState("XUSDT")
+    state.book.apply(
+        {
+            "type": "snapshot",
+            "data": {"s": "XUSDT", "u": 1, "seq": 1, "b": [["100", "2"]], "a": [["100.05", "3"]]},
+        },
+        1_000,
+    )
+    state.snapshot_received_at_ms = -300_000
+    state.orderflow_ready = True
+    app.stream_connected = True
+    app.evaluation_eligible = True
+
+    wide = app._readiness(state, 1_000)
+    assert wide["blocker"] == "spread_too_wide"
+    assert wide["data_quality_blockers"] == ["spread_too_wide"]
+    assert wide["book_age_ms"] == 0
+
+    both = app._readiness(state, 2_000)
+    assert both["blocker"] == "book_stale_and_spread_too_wide"
+    assert both["data_quality_blockers"] == ["book_stale", "spread_too_wide"]
+
+
 def test_orderbook_message_does_not_drop_completed_footprint(tmp_path: Path) -> None:
     app = PaperApp(Journal(tmp_path / "paper.db"))
     state = SymbolState("XUSDT", tick_size=0.01)
@@ -453,6 +478,107 @@ def test_orderbook_message_does_not_drop_completed_footprint(tmp_path: Path) -> 
 
     assert len(state.bars["15s"]) == 1
     assert state.bars["15s"][0].close == 100.0
+
+
+def test_public_trade_arms_level_episode_before_15s_completion(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("XUSDT", tick_size=0.01)
+    state.levels = [
+        Level(
+            "live-level", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+            level_version=DIGASH_LEVEL_VERSION,
+        )
+    ]
+    app.states = {"XUSDT": state}
+    app.strategies = {"XUSDT": StrategyV2Evaluator(tick_size=0.01)}
+
+    asyncio.run(
+        app.handle_message(
+            {
+                "topic": "publicTrade.XUSDT",
+                "data": [{"s": "XUSDT", "i": "arm", "p": "99.95", "v": "1", "S": "Buy"}],
+            },
+            1_005,
+        )
+    )
+
+    episodes = app.strategies["XUSDT"].active_approaches()
+    assert episodes[0]["level_id"] == "live-level"
+    assert episodes[0]["armed_at_ms"] == 1_005
+    persisted = journal.shadow_diagnostics("XUSDT", protocol_hash=app.protocol_hash)
+    assert persisted[0]["lane"] == "level_reaction_episode"
+    assert persisted[0]["status"] == "ARMED"
+
+
+def test_fresh_book_snapshot_invalidates_open_level_episode(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("XUSDT", tick_size=0.01)
+    state.levels = [
+        Level(
+            "live-level", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+            level_version=DIGASH_LEVEL_VERSION,
+        )
+    ]
+    evaluator = StrategyV2Evaluator(tick_size=0.01)
+    evaluator.observe_price(
+        symbol="XUSDT", now_ms=1_000, price=99.95,
+        levels=state.levels, source="public_trade",
+    )
+    evaluator.drain_episode_events()
+    app.states = {"XUSDT": state}
+    app.strategies = {"XUSDT": evaluator}
+
+    asyncio.run(
+        app.handle_message(
+            {
+                "topic": "orderbook.50.XUSDT",
+                "type": "snapshot",
+                "data": {"s": "XUSDT", "u": 1, "seq": 1,
+                         "b": [["109.99", "2"]], "a": [["110.01", "3"]]},
+            },
+            2_000,
+        )
+    )
+
+    assert evaluator.active_approaches() == []
+    rows = journal.shadow_diagnostics("XUSDT", protocol_hash=app.protocol_hash)
+    assert rows[0]["status"] == "INVALIDATED"
+    assert rows[0]["reason"] == "book_snapshot_reset"
+
+
+def test_incomplete_orderflow_bucket_invalidates_open_level_episode(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("XUSDT", tick_size=0.01)
+    state.levels = [
+        Level(
+            "live-level", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+            level_version=DIGASH_LEVEL_VERSION,
+        )
+    ]
+    evaluator = StrategyV2Evaluator(tick_size=0.01)
+    evaluator.observe_price(
+        symbol="XUSDT", now_ms=1_000, price=99.95,
+        levels=state.levels, source="public_trade",
+    )
+    evaluator.drain_episode_events()
+    app.states = {"XUSDT": state}
+    app.strategies = {"XUSDT": evaluator}
+
+    app._complete_footprint(
+        {
+            "symbol": "XUSDT", "bucket_start_ms": 0, "bucket_end_ms": 15_000,
+            "open": 100, "high": 100.1, "low": 99.9, "close": 100,
+            "volume": 1, "delta_notional": 0, "trades": 1, "incomplete": True,
+        }
+    )
+
+    assert evaluator.active_approaches() == []
+    rows = journal.shadow_diagnostics("XUSDT", protocol_hash=app.protocol_hash)
+    assert rows[0]["status"] == "INVALIDATED"
+    assert rows[0]["reason"] == "orderflow_incomplete"
 
 
 def test_observation_only_still_refreshes_orderflow_panel(tmp_path: Path) -> None:
@@ -519,6 +645,49 @@ def test_observation_only_records_classified_reaction_without_execution(tmp_path
     assert len(rows) == 1
     assert rows[0]["status"] == "OBSERVED"
     assert rows[0]["reason"] == "partial_day_observation_only"
+
+
+def test_data_quality_blocked_reaction_is_persisted_without_execution(tmp_path: Path, monkeypatch) -> None:
+    journal = Journal(tmp_path / "paper.db")
+    app = PaperApp(journal)
+    state = SymbolState("XUSDT")
+    now_ms = 400_000
+    state.book.apply(
+        {"type": "snapshot", "data": {"s": "XUSDT", "u": 1, "seq": 1,
+                                       "b": [["100", "20"]], "a": [["100.01", "5"]]}},
+        now_ms - 1_000,
+    )
+    state.snapshot_received_at_ms = 0
+    state.orderflow_ready = True
+    state.bars["15s"] = [
+        Bar("XUSDT", 15_000, i * 15_000, (i + 1) * 15_000, 100, 100.1, 99.9, 100, 1, 100, 2)
+        for i in range(21)
+    ]
+    app.stream_connected = True
+    app.evaluation_eligible = True
+    level = Level("level", "XUSDT", "1m", LevelSide.HIGH, 99.9, 0)
+    blocked = StrategyDecision(
+        None, "terminal_level_breakout", DecisionStatus.BLOCKED.value, "book_stale",
+        Side.LONG, level, None, 99.8, 99.8, "setup", {"reaction_observed": "true"},
+    )
+
+    class StubEvaluator:
+        def evaluate(self, **kwargs):
+            return [blocked]
+
+        def active_approaches(self):
+            return []
+
+    app.strategies = {"XUSDT": StubEvaluator()}
+    monkeypatch.setattr(app.executor, "submit", lambda *args, **kwargs: pytest.fail("blocked reaction submitted"))
+
+    app._evaluate_v2(state, {"stacks": []}, now_ms)
+
+    rows = journal.shadow_diagnostics("XUSDT", protocol_hash=app.protocol_hash)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "BLOCKED"
+    assert rows[0]["reason"] == "book_stale"
+    assert rows[0]["features"]["not_a_fill"] == "true"
 
 
 def test_signal_path_records_first_touch_once_and_is_not_a_fill(tmp_path: Path) -> None:

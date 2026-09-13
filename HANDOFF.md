@@ -1,5 +1,23 @@
 # sniper-paper operational handoff
 
+## Release v2.10.0 — live multi-bar level episodes (2026-09-13)
+
+- Proximity is armed from live public trades or book midpoint inside the
+  20 bp/three-tick zone. A quote midpoint can arm observation but cannot prove
+  a cross; the arming trade is excluded from post-arm Delta.
+- A level episode can span multiple 15s buckets and 1m candles. It has no time
+  expiry and closes only after a signal, a completed 15s close more than 60 bp
+  from the level, level invalidation, or loss of data continuity.
+- Sweep/reclaim and breakout acceptance retain their price state while waiting
+  for current orderflow. Stale books and wide spreads are persisted as exact
+  `BLOCKED` diagnostics rather than being collapsed into a generic rejection;
+  they can never submit a paper order.
+- Disconnect, fresh-book snapshot, and incomplete footprint reset open level
+  episodes. Episode lifecycle is persisted separately in
+  `shadow_diagnostics` under `level_reaction_episode`.
+- The 60 bp departure threshold and existing orderflow thresholds remain
+  versioned hypotheses requiring forward paper observation.
+
 ## Release v2.9.0 — approach-first orderflow reactions (2026-09-12)
 
 - The 1m chart and causal Digash level catalogue remain the structural context.
@@ -54,7 +72,7 @@
   remain unpublished. These choices are explicitly versioned hypotheses.
 - Deployment verification is recorded below after rollout.
 
-Last updated: 2026-09-12 (Europe/Kyiv)
+Last updated: 2026-09-13 (Europe/Kyiv)
 
 ## Safety boundary
 

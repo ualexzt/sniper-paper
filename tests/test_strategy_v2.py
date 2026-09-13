@@ -171,14 +171,14 @@ def test_stale_book_can_arm_approach_but_cannot_trigger() -> None:
     armed = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000, bars=arm_bars,
                                         levels=[fixture["level"]], orderflow=stale), fixture["lane"])
     assert armed.signal is None
-    assert armed.reason == "data_quality"
+    assert armed.reason == "no_orderflow_breakout"
     assert evaluator.active_approaches()[0]["level_id"] == fixture["level"].level_id
     triggered = decision(evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"],
                                             levels=[fixture["level"]], orderflow=fixture["frame"]), fixture["lane"])
     assert triggered.status == DecisionStatus.TRIGGERED.value
 
 
-def test_consumed_or_expired_approach_requires_departure_before_rearm() -> None:
+def test_consumed_approach_requires_far_departure_before_rearm() -> None:
     fixture = build_level_approach_fixture("rejection")
     evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
     arm_bars = {**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]}
@@ -192,15 +192,119 @@ def test_consumed_or_expired_approach_requires_departure_before_rearm() -> None:
                        levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_245_000))
     assert evaluator.active_approaches() == []
 
-    departed = bar(15_000, 1_230_000, 100.06, 100.55, 100.05, 100.50, 5)
+    departed = bar(15_000, 1_230_000, 100.06, 100.85, 100.05, 100.80, 5)
     evaluator.evaluate(symbol="XUSDT", now_ms=1_245_000,
                        bars={**fixture["bars"], "15s": [*fixture["bars"]["15s"], departed]},
                        levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_245_000))
-    returned = bar(15_000, 1_245_000, 100.50, 100.52, 100.02, 100.05, 5)
+    returned = bar(15_000, 1_245_000, 100.80, 100.82, 100.02, 100.05, 5)
     evaluator.evaluate(symbol="XUSDT", now_ms=1_260_000,
                        bars={**fixture["bars"], "15s": [*fixture["bars"]["15s"], departed, returned]},
                        levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_260_000))
     assert evaluator.active_approaches()[0]["level_id"] == fixture["level"].level_id
+
+
+def test_live_episode_can_span_multiple_bars_and_confirm_reclaim() -> None:
+    baseline_15s = [bar(15_000, 900_000 + i * 15_000, 100, 100.08, 99.92, 100, 10) for i in range(20)]
+    bars_1m = [bar(60_000, i * 60_000, 100, 100.1, 99.9, 100, 10) for i in range(20)]
+    level = Level("ake-resistance", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+                  level_version=DIGASH_LEVEL_VERSION)
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    evaluator.observe_price(symbol="XUSDT", now_ms=1_200_005, price=99.95, levels=[level])
+
+    crossed = bar(15_000, 1_200_000, 99.95, 100.03, 99.94, 100.02, 5)
+    weak_up = OrderflowFrame("XUSDT", 1_215_000, 100.01, 12, 100.02, 5, 5, 20, 9, 10,
+                             2_000, 1_000, 0.2, 10, 1)
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_215_000,
+                       bars={"15s": [*baseline_15s, crossed], "1m": bars_1m},
+                       levels=[level], orderflow=weak_up)
+    held = bar(15_000, 1_215_000, 100.02, 100.05, 100.01, 100.03, 5)
+    evaluator.evaluate(symbol="XUSDT", now_ms=1_230_000,
+                       bars={"15s": [*baseline_15s, crossed, held], "1m": bars_1m},
+                       levels=[level], orderflow=replace(weak_up, received_at_ms=1_230_000))
+
+    reclaimed = bar(15_000, 1_230_000, 100.03, 100.04, 99.95, 99.98, -50)
+    reversal = OrderflowFrame("XUSDT", 1_245_000, 99.98, 5, 99.99, 12, -50, 20, 9, 10,
+                              1_000, 2_000, 0.2, 10, 1)
+    result = decision(evaluator.evaluate(
+        symbol="XUSDT", now_ms=1_245_000,
+        bars={"15s": [*baseline_15s, crossed, held, reclaimed], "1m": bars_1m},
+        levels=[level], orderflow=reversal,
+    ), LaneName.FAILED_SWEEP_RECLAIM.value)
+
+    assert result.status == DecisionStatus.TRIGGERED.value
+    assert result.side is Side.SHORT
+    assert result.features["episode_id"]
+    assert result.features["crossed_extreme_price"] == 100.05
+
+
+def test_level_episode_does_not_expire_while_price_remains_near_level() -> None:
+    level = Level("persistent", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+                  level_version=DIGASH_LEVEL_VERSION)
+    evaluator = StrategyV2Evaluator()
+    evaluator.observe_price(symbol="XUSDT", now_ms=1_000, price=99.95, levels=[level])
+    evaluator.observe_price(symbol="XUSDT", now_ms=301_000, price=99.96, levels=[level])
+    assert evaluator.active_approaches()[0]["armed_at_ms"] == 1_000
+
+
+def test_live_arm_can_confirm_same_bucket_using_only_post_arm_trades() -> None:
+    baseline_15s = [bar(15_000, 900_000 + i * 15_000, 100, 100.08, 99.92, 100, 10) for i in range(20)]
+    bars_1m = [bar(60_000, i * 60_000, 100, 100.1, 99.9, 100, 10) for i in range(20)]
+    level = Level("support", "XUSDT", "1m", LevelSide.LOW, 100, 0,
+                  level_version=DIGASH_LEVEL_VERSION)
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    evaluator.observe_price(
+        symbol="XUSDT", now_ms=1_200_005, price=100.02, levels=[level],
+        trade_side="Sell", quantity=1,
+    )
+    assert evaluator.active_approaches()[0]["post_arm_trades"] == 0
+    assert evaluator.active_approaches()[0]["post_arm_delta_notional"] == 0
+    evaluator.observe_price(
+        symbol="XUSDT", now_ms=1_200_010, price=99.97, levels=[level],
+        trade_side="Sell", quantity=1,
+    )
+    reaction = bar(15_000, 1_200_000, 100.02, 100.10, 99.97, 100.06, 999)
+    frame = OrderflowFrame("XUSDT", 1_215_000, 100.05, 12, 100.06, 5, 1, 20, 13, 10,
+                           2_000, 1_000, 0.2, 10, 1)
+    result = decision(evaluator.evaluate(
+        symbol="XUSDT", now_ms=1_215_000,
+        bars={"15s": [*baseline_15s, reaction], "1m": bars_1m},
+        levels=[level], orderflow=frame,
+    ), LaneName.FAILED_SWEEP_RECLAIM.value)
+    assert result.status == DecisionStatus.TRIGGERED.value
+    assert result.features["orderflow_window"] == "post_arm_live"
+    assert result.features["delta_notional"] < -frame.median_abs_delta_20
+
+
+def test_book_midpoint_can_arm_but_cannot_prove_level_cross() -> None:
+    level = Level("resistance", "XUSDT", "1m", LevelSide.HIGH, 100, 0,
+                  level_version=DIGASH_LEVEL_VERSION)
+    evaluator = StrategyV2Evaluator(tick_size=0.01)
+
+    evaluator.observe_price(
+        symbol="XUSDT", now_ms=1_000, price=100.01, levels=[level],
+        source="orderbook_mid",
+    )
+
+    episode = evaluator.active_approaches()[0]
+    assert episode["crossed_at_ms"] is None
+    assert [event["event_type"] for event in evaluator.drain_episode_events()] == ["ARMED"]
+
+
+def test_price_reaction_is_recorded_as_blocked_when_book_is_stale() -> None:
+    fixture = build_level_approach_fixture("rejection")
+    evaluator = StrategyV2Evaluator(min_book_imbalance=0.01)
+    evaluator.evaluate(
+        symbol="XUSDT", now_ms=1_215_000,
+        bars={**fixture["bars"], "15s": fixture["bars"]["15s"][:-1]},
+        levels=[fixture["level"]], orderflow=replace(fixture["frame"], received_at_ms=1_215_000),
+    )
+    blocked = decision(evaluator.evaluate(
+        symbol="XUSDT", now_ms=1_230_000, bars=fixture["bars"], levels=[fixture["level"]],
+        orderflow=replace(fixture["frame"], book_age_ms=1_000),
+    ), fixture["lane"])
+    assert blocked.status == DecisionStatus.BLOCKED.value
+    assert blocked.reason == "book_stale"
+    assert blocked.features["reaction_observed"] == "true"
 
 
 @pytest.mark.parametrize("kind", ["breakout", "rejection"])

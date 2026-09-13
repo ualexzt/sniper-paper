@@ -1,10 +1,13 @@
 # Strategy V2
 
-Frozen protocol version: v2.9.0, dated 2026-09-12. It retains one canonical
+Frozen protocol version: v2.10.0, dated 2026-09-13. It retains one canonical
 level model/catalogue for target selection, durable absorbing level lifecycle,
 provenance/session binding, and threshold-free Digash metric observations.
-The executable scope is restricted to direct level reactions. The new approach
-zone and timeout are explicitly versioned hypotheses requiring forward data.
+The executable scope is restricted to live level-reaction episodes. An episode
+starts near a level from live trades or book midpoint data, can span multiple 1m
+candles, and has no time timeout. It ends only on SIGNAL, 60 bp far departure,
+level invalidation, or data-continuity reset. Numeric thresholds remain
+hypotheses requiring forward data.
 
 ## Immutable provenance and sessions
 
@@ -12,17 +15,17 @@ zone and timeout are explicitly versioned hypotheses requiring forward data.
 paper order, and evaluation session must be attributable to these immutable
 identifiers:
 
-- `strategy`: `v2.7.0-level-approach-orderflow`, causal approach and orderflow reaction scope;
+- `strategy`: `v2.8.0-live-level-episode-orderflow`, causal live episode and orderflow scope;
 - `level`: the causal level lifecycle and geometry contract;
 - `universe`: `daily_universe_v2_shadow_metrics`, the once-daily UTC selector
   contract with recorded $50k liquidity diagnostics;
 - `execution`: the paper queue, fill, cost, and bracket contract;
 - `source_data_contract`: the public Bybit market-data and causal-input contract.
 
-The top-level protocol version is `v2.9.0` because execution now arms when a
-completed 15s bar approaches a level and classifies the later reaction from
-15s footprint and current book evidence. Target eligibility and level lifecycle
-persistence, and the recorded metric/coverage contract remain causal. The
+The top-level protocol version is `v2.10.0` because execution now tracks a
+no-timeout live level episode across completed 1m candles. Stale or wide books
+block execution but do not erase the price reaction. Target eligibility and
+level lifecycle persistence, and the recorded metric/coverage contract remain causal. The
 metric and liquidity observations do not participate in trade eligibility.
 The `session_policy` binds a
 session to `{utc_date}:{protocol_sha256}` and requires a new session whenever
@@ -146,24 +149,26 @@ Thresholds that are defined in `TRADING_RULES_V1.md` are reused directly:
 - 250 ms entry latency
 - 2 s entry TTL
 - 20 bp or three-tick approach zone, whichever is wider
-- 120 s maximum approach observation window
+- 60 bp far-departure threshold; no time-based approach expiry
 - 9.5 bp budgeted execution cost
 
 Anything not defined by v1 is treated as a predeclared conservative hypothesis.
 
 ## Lane Notes
 
-`failed_sweep_reclaim` is the orderflow rejection lane. A completed 15s bar
-must first enter the approach zone from the valid side of an active level. A
-later completed 15s bar must pierce the level and close back across it while
-delta magnitude and the current book support the reversal direction.
+`failed_sweep_reclaim` is the orderflow rejection lane. A live trade or book
+midpoint first arms the approach zone from the valid side of an active level.
+The same completed 15s bucket may confirm only from trades observed after the
+arm; otherwise a later bucket may confirm. Traded price must pierce the level
+and a completed 15s bar must close back across it while delta magnitude and the
+current book support the reversal direction.
 
 Executable entries are restricted to a direct reaction at an active horizontal
 level after a prior causal approach observation:
 `failed_sweep_reclaim` (sweep and reclaim) and `terminal_level_breakout`
-(15s acceptance beyond the level with directional orderflow). A reaction bar
-cannot arm and trigger the same approach. A consumed or expired approach can
-rearm only after price leaves the zone. `early_target_hunt` and `target_seeking_breakout`
+(15s acceptance beyond the level with directional orderflow). A book midpoint
+can arm but cannot by itself prove a cross. A consumed episode can rearm only
+after price moves beyond the 60 bp departure threshold. `early_target_hunt` and `target_seeking_breakout`
 are preparation/legacy diagnostics and cannot arm or emit a paper signal.
 `structural_reaction`, `cascade_impulse`, and `fresh_extreme_momentum` remain
 shadow diagnostics only; none has an execution path.

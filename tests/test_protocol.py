@@ -64,9 +64,9 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     v2_path = PROTOCOL_PATH.with_name("paper_strategy_v2.json")
     payload = json.loads(v2_path.read_text(encoding="utf-8"))
 
-    assert payload["version"] == "v2.9.0"
+    assert payload["version"] == "v2.10.0"
     assert payload["versions"] == {
-        "strategy": "v2.7.0-level-approach-orderflow",
+        "strategy": "v2.8.0-live-level-episode-orderflow",
         "level": "digash_horizontal_levels_v3_touch_episodes",
         "universe": "daily_universe_v2_shadow_metrics",
         "execution": "paper_execution_v2_dust_guard_relative_epsilon",
@@ -100,8 +100,14 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
     }
     assert payload["level_reaction_execution_policy"] == {
         "context_timeframe": "1m",
-        "approach_timeframe": "15s",
-        "reaction_timeframe": "15s",
+        "confirmation_timeframe": "15s",
+        "episode_lane": "level_reaction_episode",
+        "episode_start": "live_trade_or_book_midpoint_near_level",
+        "episode_timeout_ms": None,
+        "far_departure_bp": 60.0,
+        "termination_reasons": ["SIGNAL", "FAR_DEPARTURE", "LEVEL_INVALIDATION", "DATA_CONTINUITY_RESET"],
+        "cross_requires_public_trade_or_completed_footprint": True,
+        "arming_trade_excluded_from_post_arm_delta": True,
         "reference_level_timeframes": ["1m", "5m", "15m", "30m", "1h", "4h", "1d"],
         "executable_lanes": ["failed_sweep_reclaim", "terminal_level_breakout"],
         "orderflow_required": True,
@@ -112,6 +118,15 @@ def test_v2_protocol_declares_immutable_versions_and_session_binding() -> None:
         "approach_must_precede_reaction": True,
         "non_reaction_lanes": "diagnostic_only",
     }
+    strategy = payload["parameters"]["strategy"]
+    assert "approach_timeout_ms" not in strategy
+    assert strategy["approach_departure_bp"] == 60.0
+    assert strategy["breakout_confirm_closes"] == 1
+    executable = {
+        row["name"]: row for row in payload["lanes"]
+        if row["name"] in {"failed_sweep_reclaim", "terminal_level_breakout"}
+    }
+    assert all("confirmation_timeout_ms" not in lane for lane in executable.values())
     assert payload["safety_boundary"]["paper_only"] is True
     assert payload["safety_boundary"]["authenticated_orders_allowed"] is False
     assert payload["metrics_observation_policy"]["trade_gate_enabled"] is False

@@ -23,6 +23,7 @@ from .paper import Side
 class DecisionStatus(str, Enum):
     REJECTED = "REJECTED"
     MISSED = "MISSED"
+    BLOCKED = "BLOCKED"
     TRIGGERED = "TRIGGERED"
 
 
@@ -217,8 +218,15 @@ class _PendingSetup:
 class _LevelApproach:
     level: Level
     armed_at_ms: int
-    expires_at_ms: int
     approach_side: str
+    episode_id: str
+    last_observed_at_ms: int
+    last_price: float
+    crossed_at_ms: int | None = None
+    crossed_extreme_price: float | None = None
+    accepted_closes: int = 0
+    post_arm_delta_notional: float = 0.0
+    post_arm_trades: int = 0
 
 
 def _hash(*parts: object) -> str:
@@ -386,7 +394,8 @@ class StrategyV2Evaluator:
         fresh_extreme_lookback_4h: int = 6,
         approach_zone_bp: float = 20.0,
         approach_min_ticks: int = 3,
-        approach_timeout_ms: int = 120_000,
+        approach_departure_bp: float = 60.0,
+        breakout_confirm_closes: int = 1,
         reaction_buffer_ticks: int = 1,
     ) -> None:
         self.tick_size = tick_size
@@ -417,7 +426,8 @@ class StrategyV2Evaluator:
         self.fresh_extreme_lookback_4h = fresh_extreme_lookback_4h
         self.approach_zone_bp = approach_zone_bp
         self.approach_min_ticks = approach_min_ticks
-        self.approach_timeout_ms = approach_timeout_ms
+        self.approach_departure_bp = approach_departure_bp
+        self.breakout_confirm_closes = breakout_confirm_closes
         self.reaction_buffer_ticks = reaction_buffer_ticks
         self._pending: dict[str, _PendingSetup] = {}
         self._approaches: dict[str, _LevelApproach] = {}
@@ -425,22 +435,167 @@ class StrategyV2Evaluator:
         self._attempted: set[str] = set()
         self._cooldown_until_ms: dict[str, int] = {}
         self._last_triggered: dict[tuple[str, str], tuple[int, str, Side]] = {}
+        self._episode_events: list[dict[str, float | int | str | None]] = []
 
     def restore_attempts(self, attempts: Iterable[str]) -> None:
         self._attempted.update(attempts)
 
-    def active_approaches(self) -> list[Mapping[str, float | int | str]]:
+    def active_approaches(self) -> list[Mapping[str, float | int | str | None]]:
         return [
             {
+                "episode_id": item.episode_id,
                 "level_id": item.level.level_id,
                 "timeframe": item.level.timeframe,
                 "side": item.level.side.value,
                 "price": item.level.price,
                 "armed_at_ms": item.armed_at_ms,
-                "expires_at_ms": item.expires_at_ms,
+                "last_observed_at_ms": item.last_observed_at_ms,
+                "last_price": item.last_price,
+                "crossed_at_ms": item.crossed_at_ms,
+                "crossed_extreme_price": item.crossed_extreme_price,
+                "accepted_closes": item.accepted_closes,
+                "post_arm_delta_notional": item.post_arm_delta_notional,
+                "post_arm_trades": item.post_arm_trades,
             }
             for item in sorted(self._approaches.values(), key=lambda row: (row.level.price, row.level.level_id))
         ]
+
+    def drain_episode_events(self) -> list[dict[str, float | int | str | None]]:
+        events, self._episode_events = self._episode_events, []
+        return events
+
+    def reset_level_episodes(self, now_ms: int, reason: str) -> None:
+        for approach in list(self._approaches.values()):
+            self._emit_episode_event(approach, now_ms, "UNKNOWN", approach.last_price, reason)
+        self._approaches.clear()
+        self._consumed_approaches.clear()
+
+    def observe_price(
+        self,
+        *,
+        symbol: str,
+        now_ms: int,
+        price: float,
+        levels: Iterable[Level],
+        source: str = "public_trade",
+        trade_side: str | None = None,
+        quantity: float = 0.0,
+    ) -> None:
+        """Arm and advance a causal level episode from a live public price.
+
+        Entry decisions still use completed orderflow buckets.  This method
+        merely starts observation before that confirmation exists, so the
+        trade that enters the zone can never fill its own later signal.
+        """
+
+        if not math.isfinite(price) or price <= 0:
+            return
+        active_by_id = {
+            level.level_id: level
+            for level in canonical_level_catalog(levels, symbol, now_ms)
+            if level.timeframe in DIGASH_LEVEL_TIMEFRAMES
+        }
+        for level_id, approach in list(self._approaches.items()):
+            level = active_by_id.get(level_id)
+            if level is None:
+                self._emit_episode_event(approach, now_ms, "INVALIDATED", price, "level_inactive")
+                self._approaches.pop(level_id, None)
+                continue
+            approach.level = level
+            approach.last_observed_at_ms = now_ms
+            approach.last_price = price
+            self._accumulate_episode_trade(approach, price, trade_side, quantity)
+            self._observe_cross(approach, now_ms, price, source)
+
+        for level in active_by_id.values():
+            distance_bp = abs(price / level.price - 1.0) * 10_000
+            zone_bp = self._approach_zone_for(level)
+            if level.level_id in self._consumed_approaches:
+                if distance_bp > self.approach_departure_bp:
+                    self._consumed_approaches.remove(level.level_id)
+                else:
+                    continue
+            if level.level_id in self._approaches or distance_bp > zone_bp:
+                continue
+            valid_side = (
+                level.side is LevelSide.HIGH and price <= level.price + self.reaction_buffer_ticks * self.tick_size
+            ) or (
+                level.side is LevelSide.LOW and price >= level.price - self.reaction_buffer_ticks * self.tick_size
+            )
+            if not valid_side:
+                continue
+            episode = _LevelApproach(
+                level=level,
+                armed_at_ms=now_ms,
+                approach_side="below" if level.side is LevelSide.HIGH else "above",
+                episode_id=_hash(symbol, level.level_id, now_ms),
+                last_observed_at_ms=now_ms,
+                last_price=price,
+            )
+            self._approaches[level.level_id] = episode
+            self._emit_episode_event(episode, now_ms, "ARMED", price, source)
+            self._observe_cross(episode, now_ms, price, source)
+
+    @staticmethod
+    def _accumulate_episode_trade(
+        approach: _LevelApproach,
+        price: float,
+        trade_side: str | None,
+        quantity: float,
+    ) -> None:
+        if trade_side not in {"Buy", "Sell"} or not math.isfinite(quantity) or quantity <= 0:
+            return
+        approach.post_arm_delta_notional += price * quantity * (1 if trade_side == "Buy" else -1)
+        approach.post_arm_trades += 1
+
+    def _approach_zone_for(self, level: Level) -> float:
+        return max(self.approach_zone_bp, self.approach_min_ticks * self.tick_size / level.price * 10_000)
+
+    def _observe_cross(self, approach: _LevelApproach, now_ms: int, price: float, source: str) -> None:
+        # Quotes can arm observation, but only traded prices (live or in a
+        # completed footprint) prove that price actually crossed the level.
+        if source == "orderbook_mid":
+            return
+        buffer = self.reaction_buffer_ticks * self.tick_size
+        crossed = (
+            approach.level.side is LevelSide.HIGH and price >= approach.level.price + buffer
+        ) or (
+            approach.level.side is LevelSide.LOW and price <= approach.level.price - buffer
+        )
+        if not crossed:
+            return
+        if approach.crossed_at_ms is None:
+            approach.crossed_at_ms = now_ms
+            approach.crossed_extreme_price = price
+            self._emit_episode_event(approach, now_ms, "CROSSED", price, source)
+        elif approach.level.side is LevelSide.HIGH:
+            approach.crossed_extreme_price = max(approach.crossed_extreme_price or price, price)
+        else:
+            approach.crossed_extreme_price = min(approach.crossed_extreme_price or price, price)
+
+    def _emit_episode_event(
+        self,
+        approach: _LevelApproach,
+        now_ms: int,
+        event_type: str,
+        price: float,
+        reason: str,
+    ) -> None:
+        self._episode_events.append(
+            {
+                "event_id": _hash(approach.episode_id, event_type, now_ms),
+                "episode_id": approach.episode_id,
+                "occurred_at_ms": now_ms,
+                "event_type": event_type,
+                "reason": reason,
+                "symbol": approach.level.symbol,
+                "level_id": approach.level.level_id,
+                "level_timeframe": approach.level.timeframe,
+                "level_side": approach.level.side.value,
+                "level_price": approach.level.price,
+                "observed_price": price,
+            }
+        )
 
     def evaluate(
         self,
@@ -498,40 +653,67 @@ class StrategyV2Evaluator:
         self._consumed_approaches.intersection_update(active_by_id)
         for level_id, approach in list(self._approaches.items()):
             current = active_by_id.get(level_id)
-            if current is None or now_ms > approach.expires_at_ms:
+            if current is None:
+                self._emit_episode_event(approach, now_ms, "INVALIDATED", approach.last_price, "level_inactive")
                 self._approaches.pop(level_id, None)
-                if current is not None:
-                    self._consumed_approaches.add(level_id)
             else:
                 approach.level = current
         if not bars_15s:
             return
         current = bars_15s[-1]
+        buffer = self.reaction_buffer_ticks * self.tick_size
+        for level_id, approach in list(self._approaches.items()):
+            if current.closed_at_ms <= approach.armed_at_ms:
+                continue
+            level = approach.level
+            crossing_price = current.high if level.side is LevelSide.HIGH else current.low
+            self._observe_cross(approach, current.closed_at_ms, crossing_price, "completed_15s")
+            accepted = (
+                level.side is LevelSide.HIGH and current.close >= level.price + buffer
+            ) or (
+                level.side is LevelSide.LOW and current.close <= level.price - buffer
+            )
+            approach.accepted_closes = approach.accepted_closes + 1 if accepted else 0
+            approach.last_observed_at_ms = max(approach.last_observed_at_ms, current.closed_at_ms)
+            approach.last_price = current.close
+            close_distance = abs(current.close / level.price - 1.0) * 10_000
+            if close_distance > self.approach_departure_bp:
+                self._emit_episode_event(approach, current.closed_at_ms, "DEPARTED", current.close, "price_departed")
+                self._approaches.pop(level_id, None)
+
         candidates: list[tuple[float, Level, str]] = []
         for level in active_by_id.values():
             close_distance = abs(current.close / level.price - 1.0) * 10_000
+            if level.level_id in self._consumed_approaches:
+                if close_distance > self.approach_departure_bp:
+                    self._consumed_approaches.remove(level.level_id)
+                else:
+                    continue
+            if close_distance > self.approach_departure_bp:
+                continue
             distance = (
                 max(0.0, (level.price - current.high) / level.price * 10_000)
                 if level.side is LevelSide.HIGH
                 else max(0.0, (current.low - level.price) / level.price * 10_000)
             )
-            zone = max(self.approach_zone_bp, self.approach_min_ticks * self.tick_size / level.price * 10_000)
-            if level.level_id in self._consumed_approaches:
-                if close_distance > zone:
-                    self._consumed_approaches.remove(level.level_id)
-                else:
-                    continue
-            if distance > zone:
+            zone = self._approach_zone_for(level)
+            if level.level_id in self._approaches or distance > zone:
                 continue
             if level.side is LevelSide.HIGH and current.close <= level.price:
                 candidates.append((distance, level, "below"))
             elif level.side is LevelSide.LOW and current.close >= level.price:
                 candidates.append((distance, level, "above"))
         for _, level, approach_side in sorted(candidates, key=lambda row: (row[0], row[1].level_id)):
-            self._approaches.setdefault(
-                level.level_id,
-                _LevelApproach(level, current.closed_at_ms, current.closed_at_ms + self.approach_timeout_ms, approach_side),
+            episode = _LevelApproach(
+                level=level,
+                armed_at_ms=current.closed_at_ms,
+                approach_side=approach_side,
+                episode_id=_hash(symbol, level.level_id, current.closed_at_ms),
+                last_observed_at_ms=current.closed_at_ms,
+                last_price=current.close,
             )
+            self._approaches[level.level_id] = episode
+            self._emit_episode_event(episode, current.closed_at_ms, "ARMED", current.close, "completed_15s_fallback")
 
     def _approached_levels(
         self,
@@ -545,8 +727,7 @@ class StrategyV2Evaluator:
             level = current_by_id.get(approach.level.level_id)
             if (
                 level is not None
-                and approach.armed_at_ms <= current.opened_at_ms
-                and current.closed_at_ms <= approach.expires_at_ms
+                and approach.armed_at_ms < current.closed_at_ms
                 and level_active_at(level, current.opened_at_ms)
             ):
                 approach.level = level
@@ -562,8 +743,6 @@ class StrategyV2Evaluator:
         frame: OrderflowFrame,
     ) -> StrategyDecision:
         lane = LaneName.FAILED_SWEEP_RECLAIM.value
-        if not self._data_quality_ok(frame):
-            return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
         fifteen = bars.get("15s", ())
         if len(fifteen) < 21 or frame.median_abs_delta_20 <= 0:
             return self._reject(lane=lane, reason="warmup", side=None, features={})
@@ -574,70 +753,132 @@ class StrategyV2Evaluator:
         candidates: list[_LaneCandidate] = []
         for approach in self._approached_levels(symbol, current, levels):
             level = approach.level
-            buffer = self.reaction_buffer_ticks * self.tick_size
+            same_bucket_arm = approach.armed_at_ms > current.opened_at_ms
+            reaction_delta = approach.post_arm_delta_notional if same_bucket_arm else frame.delta_notional
+            reaction_delta_ratio = abs(reaction_delta) / frame.median_abs_delta_20
             if level.side is LevelSide.LOW:
                 side = Side.LONG
-                reacted = current.low <= level.price - buffer and current.close > level.price
+                reacted = (
+                    approach.crossed_at_ms is not None or current.low <= level.price - self.tick_size
+                ) and current.close > level.price
                 flow = (
-                    abs(frame.delta_notional) >= frame.median_abs_delta_20
+                    abs(reaction_delta) >= frame.median_abs_delta_20
                     and frame.microprice > frame.mid
                     and frame.book_imbalance >= self.min_book_imbalance
                     and frame.top5_bid_notional >= self.min_depth_notional_top5
                     and frame.best_bid > level.price
                 )
                 entry = frame.best_bid
-                stop = current.low - max(2 * self.tick_size, 0.2 * atr)
+                extreme = min(current.low, approach.crossed_extreme_price or current.low)
+                stop = extreme - max(2 * self.tick_size, 0.2 * atr)
             else:
                 side = Side.SHORT
-                reacted = current.high >= level.price + buffer and current.close < level.price
+                reacted = (
+                    approach.crossed_at_ms is not None or current.high >= level.price + self.tick_size
+                ) and current.close < level.price
                 flow = (
-                    abs(frame.delta_notional) >= frame.median_abs_delta_20
+                    abs(reaction_delta) >= frame.median_abs_delta_20
                     and frame.microprice < frame.mid
                     and frame.book_imbalance <= -self.min_book_imbalance
                     and frame.top5_ask_notional >= self.min_depth_notional_top5
                     and frame.best_ask < level.price
                 )
                 entry = frame.best_ask
-                stop = current.high + max(2 * self.tick_size, 0.2 * atr)
-            if not reacted or not flow:
+                extreme = max(current.high, approach.crossed_extreme_price or current.high)
+                stop = extreme + max(2 * self.tick_size, 0.2 * atr)
+            if not reacted:
                 continue
+            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
+            episode_features = {
+                "reaction_type": "price_rejection",
+                "reference_level_id": level.level_id,
+                "reference_level_timeframe": level.timeframe,
+                "reference_level_price": level.price,
+                "approach_armed_at_ms": approach.armed_at_ms,
+                "episode_id": approach.episode_id,
+                "crossed_at_ms": approach.crossed_at_ms or current.closed_at_ms,
+                "crossed_extreme_price": approach.crossed_extreme_price or level.price,
+                "trigger_15s_closed_at_ms": current.closed_at_ms,
+                "delta_notional": reaction_delta,
+                "delta_ratio": reaction_delta_ratio,
+                "orderflow_window": "post_arm_live" if same_bucket_arm else "completed_15s",
+                "book_imbalance": frame.book_imbalance,
+                "microprice_mid_bp": frame.microprice_mid_bp,
+            }
+            quality_reason = self._data_quality_reason(frame)
+            if quality_reason is not None:
+                return self._blocked(
+                    lane=lane,
+                    reason=quality_reason,
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "reaction_observed": "true"},
+                )
+            if not flow:
+                return self._reject(
+                    lane=lane,
+                    reason="orderflow_not_confirmed",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "reaction_observed": "true"},
+                )
             risk_bp = _level_distance_bp(entry, stop)
             if not self.min_risk_bp <= risk_bp <= self.max_risk_bp:
-                continue
+                return self._reject(
+                    lane=lane,
+                    reason="risk_out_of_bounds",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "risk_bp": risk_bp},
+                )
             reward_bp = 2 * risk_bp + 3 * self.budget_cost_bp
             obstacle = _nearest_target(
                 levels, symbol=symbol, side=side, price=entry, now_ms=now_ms,
                 timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True,
             )
             if obstacle is not None and _level_distance_bp(entry, obstacle.price) < reward_bp:
-                continue
+                return self._reject(
+                    lane=lane,
+                    reason="target_obstructed",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "risk_bp": risk_bp, "obstacle_level_id": obstacle.level_id},
+                )
             target_price = entry * (1 + reward_bp / 10_000) if side is Side.LONG else entry * (1 - reward_bp / 10_000)
-            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
             features = {
+                **episode_features,
                 "reaction_type": "orderflow_rejection",
-                "reference_level_id": level.level_id,
-                "reference_level_timeframe": level.timeframe,
-                "reference_level_price": level.price,
-                "approach_armed_at_ms": approach.armed_at_ms,
-                "trigger_15s_closed_at_ms": current.closed_at_ms,
-                "delta_notional": frame.delta_notional,
-                "delta_ratio": frame.delta_ratio,
-                "book_imbalance": frame.book_imbalance,
-                "microprice_mid_bp": frame.microprice_mid_bp,
                 "risk_bp": risk_bp,
             }
             candidates.append(_LaneCandidate(
                 setup_id, lane, symbol, side, True, current.closed_at_ms,
                 current.closed_at_ms + self.entry_ttl_ms, level, target_price, stop,
-                level.price, level.price, current.low if side is Side.LONG else current.high,
-                frame.delta_ratio + abs(frame.book_imbalance), features,
+                level.price, level.price, approach.crossed_extreme_price,
+                reaction_delta_ratio + abs(frame.book_imbalance), features,
             ))
         if not candidates:
             return self._reject(lane=lane, reason="no_orderflow_rejection", side=None, features={})
         candidate = max(candidates, key=lambda item: item.score)
+        quality_reason = self._data_quality_reason(frame)
+        if quality_reason is not None:
+            return self._blocked_candidate(candidate, quality_reason, frame)
         decision = self._resolve_candidate(candidate, frame)
         if decision.signal is not None:
-            self._approaches.pop(candidate.target_level.level_id, None)
+            approach = self._approaches.pop(candidate.target_level.level_id, None)
+            if approach is not None:
+                self._emit_episode_event(approach, now_ms, "SIGNAL", frame.mid, lane)
             self._consumed_approaches.add(candidate.target_level.level_id)
         return decision
 
@@ -1177,8 +1418,6 @@ class StrategyV2Evaluator:
         frame: OrderflowFrame,
     ) -> StrategyDecision:
         lane = LaneName.TERMINAL_LEVEL_BREAKOUT.value
-        if not self._data_quality_ok(frame):
-            return self._reject(lane=lane, reason="data_quality", side=None, features={"spread_bp": frame.spread_bp})
         fifteen = bars.get("15s", ())
         if len(fifteen) < 21 or frame.median_abs_delta_20 <= 0:
             return self._reject(lane=lane, reason="warmup", side=None, features={})
@@ -1190,11 +1429,15 @@ class StrategyV2Evaluator:
         for approach in self._approached_levels(symbol, current, levels):
             level = approach.level
             buffer = self.reaction_buffer_ticks * self.tick_size
+            same_bucket_arm = approach.armed_at_ms > current.opened_at_ms
+            reaction_delta = approach.post_arm_delta_notional if same_bucket_arm else frame.delta_notional
+            reaction_delta_ratio = abs(reaction_delta) / frame.median_abs_delta_20
             if level.side is LevelSide.HIGH:
                 side = Side.LONG
-                accepted = current.close >= level.price + buffer and frame.best_bid > level.price
+                accepted = current.close >= level.price + buffer
+                quote_beyond = frame.best_bid > level.price
                 flow = (
-                    frame.delta_notional >= frame.median_abs_delta_20
+                    reaction_delta >= frame.median_abs_delta_20
                     and frame.microprice > frame.mid
                     and frame.book_imbalance >= self.min_book_imbalance
                     and frame.top5_bid_notional >= self.min_depth_notional_top5
@@ -1203,54 +1446,109 @@ class StrategyV2Evaluator:
                 stop = min(current.low, level.price - buffer) - max(2 * self.tick_size, 0.1 * atr)
             else:
                 side = Side.SHORT
-                accepted = current.close <= level.price - buffer and frame.best_ask < level.price
+                accepted = current.close <= level.price - buffer
+                quote_beyond = frame.best_ask < level.price
                 flow = (
-                    frame.delta_notional <= -frame.median_abs_delta_20
+                    reaction_delta <= -frame.median_abs_delta_20
                     and frame.microprice < frame.mid
                     and frame.book_imbalance <= -self.min_book_imbalance
                     and frame.top5_ask_notional >= self.min_depth_notional_top5
                 )
                 entry = frame.best_ask
                 stop = max(current.high, level.price + buffer) + max(2 * self.tick_size, 0.1 * atr)
-            if not accepted or not flow:
+            if not accepted or approach.accepted_closes + 1 < self.breakout_confirm_closes:
                 continue
+            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
+            episode_features = {
+                "reaction_type": "price_breakout_acceptance",
+                "reference_level_id": level.level_id,
+                "reference_level_timeframe": level.timeframe,
+                "reference_level_price": level.price,
+                "approach_armed_at_ms": approach.armed_at_ms,
+                "episode_id": approach.episode_id,
+                "crossed_at_ms": approach.crossed_at_ms or current.closed_at_ms,
+                "accepted_closes": approach.accepted_closes + 1,
+                "trigger_15s_closed_at_ms": current.closed_at_ms,
+                "delta_notional": reaction_delta,
+                "delta_ratio": reaction_delta_ratio,
+                "orderflow_window": "post_arm_live" if same_bucket_arm else "completed_15s",
+                "book_imbalance": frame.book_imbalance,
+                "microprice_mid_bp": frame.microprice_mid_bp,
+            }
+            quality_reason = self._data_quality_reason(frame)
+            if quality_reason is not None:
+                return self._blocked(
+                    lane=lane,
+                    reason=quality_reason,
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "reaction_observed": "true"},
+                )
+            if not quote_beyond or not flow:
+                return self._reject(
+                    lane=lane,
+                    reason="orderflow_not_confirmed",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "reaction_observed": "true"},
+                )
             risk_bp = _level_distance_bp(entry, stop)
             if not self.min_risk_bp <= risk_bp <= self.max_risk_bp:
-                continue
+                return self._reject(
+                    lane=lane,
+                    reason="risk_out_of_bounds",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "risk_bp": risk_bp},
+                )
             reward_bp = self.terminal_reward_risk * risk_bp
             obstacle = _nearest_target(
                 levels, symbol=symbol, side=side, price=entry, now_ms=now_ms,
                 timeframes=DIGASH_LEVEL_TIMEFRAMES, canonical=True,
             )
             if obstacle is not None and obstacle.level_id != level.level_id and _level_distance_bp(entry, obstacle.price) < reward_bp:
-                continue
+                return self._reject(
+                    lane=lane,
+                    reason="target_obstructed",
+                    side=side,
+                    target_level=level,
+                    stop_price=stop,
+                    invalidation_price=stop,
+                    setup_id=setup_id,
+                    features={**episode_features, "risk_bp": risk_bp, "obstacle_level_id": obstacle.level_id},
+                )
             target_price = entry * (1 + reward_bp / 10_000) if side is Side.LONG else entry * (1 - reward_bp / 10_000)
-            setup_id = _hash(symbol, lane, side.value, level.level_id, approach.armed_at_ms)
             features = {
+                **episode_features,
                 "reaction_type": "orderflow_breakout",
-                "reference_level_id": level.level_id,
-                "reference_level_timeframe": level.timeframe,
-                "reference_level_price": level.price,
-                "approach_armed_at_ms": approach.armed_at_ms,
-                "trigger_15s_closed_at_ms": current.closed_at_ms,
-                "delta_notional": frame.delta_notional,
-                "delta_ratio": frame.delta_ratio,
-                "book_imbalance": frame.book_imbalance,
-                "microprice_mid_bp": frame.microprice_mid_bp,
                 "risk_bp": risk_bp,
             }
             candidates.append(_LaneCandidate(
                 setup_id, lane, symbol, side, True, current.closed_at_ms,
                 current.closed_at_ms + self.entry_ttl_ms, level, target_price, stop,
                 level.price, level.price, None,
-                frame.delta_ratio + abs(frame.book_imbalance), features,
+                reaction_delta_ratio + abs(frame.book_imbalance), features,
             ))
         if not candidates:
             return self._reject(lane=lane, reason="no_orderflow_breakout", side=None, features={})
         candidate = max(candidates, key=lambda item: item.score)
+        quality_reason = self._data_quality_reason(frame)
+        if quality_reason is not None:
+            return self._blocked_candidate(candidate, quality_reason, frame)
         decision = self._resolve_candidate(candidate, frame)
         if decision.signal is not None:
-            self._approaches.pop(candidate.target_level.level_id, None)
+            approach = self._approaches.pop(candidate.target_level.level_id, None)
+            if approach is not None:
+                self._emit_episode_event(approach, now_ms, "SIGNAL", frame.mid, lane)
             self._consumed_approaches.add(candidate.target_level.level_id)
         return decision
 
@@ -1807,7 +2105,41 @@ class StrategyV2Evaluator:
         return self._trigger(candidate, frame)
 
     def _data_quality_ok(self, frame: OrderflowFrame) -> bool:
-        return frame.book_age_ms <= self.max_book_age_ms and frame.spread_bp <= self.max_spread_bp
+        return self._data_quality_reason(frame) is None
+
+    def _data_quality_reason(self, frame: OrderflowFrame) -> str | None:
+        stale = frame.book_age_ms > self.max_book_age_ms
+        wide = frame.spread_bp > self.max_spread_bp
+        if stale and wide:
+            return "book_stale_and_spread_too_wide"
+        if stale:
+            return "book_stale"
+        if wide:
+            return "spread_too_wide"
+        return None
+
+    def _blocked_candidate(
+        self,
+        candidate: _LaneCandidate,
+        reason: str,
+        frame: OrderflowFrame,
+    ) -> StrategyDecision:
+        return self._blocked(
+            lane=candidate.lane,
+            reason=reason,
+            side=candidate.side,
+            target_level=candidate.target_level,
+            target_price=candidate.target_price,
+            stop_price=candidate.stop_price,
+            invalidation_price=candidate.invalidation_price,
+            setup_id=candidate.setup_id,
+            features={
+                **dict(candidate.features),
+                "reaction_observed": "true",
+                "book_age_ms": frame.book_age_ms,
+                "spread_bp": frame.spread_bp,
+            },
+        )
 
     def _trigger(self, candidate: _LaneCandidate, frame: OrderflowFrame) -> StrategyDecision:
         if candidate.lane not in EXECUTABLE_LANES:
@@ -1965,6 +2297,33 @@ class StrategyV2Evaluator:
 
     def _diagnostic_only(self, lane: str) -> StrategyDecision:
         return self._reject(lane=lane, reason="diagnostic_only", side=None, features={})
+
+    def _blocked(
+        self,
+        *,
+        lane: str,
+        reason: str,
+        side: Side | None,
+        features: Mapping[str, float | str],
+        target_level: Level | None = None,
+        target_price: float | None = None,
+        stop_price: float | None = None,
+        invalidation_price: float | None = None,
+        setup_id: str | None = None,
+    ) -> StrategyDecision:
+        return StrategyDecision(
+            signal=None,
+            lane=lane,
+            status=DecisionStatus.BLOCKED.value,
+            reason=reason,
+            side=side,
+            target_level=target_level,
+            target_price=target_price,
+            stop_price=stop_price,
+            invalidation_price=invalidation_price,
+            setup_id=setup_id,
+            features=dict(features),
+        )
 
     def _miss(
         self,
