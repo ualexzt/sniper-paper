@@ -169,6 +169,21 @@ quality/evaluation blocker until it is separately diagnosed.
 
 ## Current deployment
 
+- Deployed code commit: `2942cbc`, protocol v2.10.0, 2026-09-13 07:30 UTC.
+- Protocol hash:
+  `df225232ce61852a35c6748dfc878bcaae70d96efd4cde4268a438c4c183b74a`.
+- Consistent pre-release backup:
+  `runtime/paper.db.pre-v2.10.0-20260913T072855Z` (`quick_check=ok`, schema 7).
+- Local Ruff, 214 tests, Docker build and image strategy initialization passed.
+  Post-deploy: HTTP 200, container healthy, restart count 0, OOM false,
+  WebSocket connected, 5/5 books ready, live SQLite `quick_check=ok`, and
+  protocol-bound `level_reaction_episode` rows are being persisted.
+- No position or pending paper order was open at restart. Because the protocol
+  changed mid-day, September 13 is observation-only; eligible forward paper
+  execution starts after the September 14 UTC selection and required warmup.
+
+## Previous deployment v2.9.0
+
 - Deployed code commit: `00795b9`, protocol v2.9.0, 2026-09-12 14:11 UTC.
 - Protocol hash:
   `ddb4a8a67ffa401644f0ffcb1ee5ef099741fd2e499a3d8996c56eec24418713`.
