@@ -1,5 +1,21 @@
 # sniper-paper operational handoff
 
+## Entry research instrumentation — 2026-09-14
+
+- Code `cd8dab3`: per-episode/per-15s evidence for both breakout and reclaim,
+  persisted as `entry_research_v1` in existing shadow diagnostics before lane
+  selection. Records individual price/Delta/book gates and full top-5 depth.
+- Strategy protocol hash, execution and money management are unchanged.
+  Research rows have their own version; this is an instrumentation boundary.
+- `scripts/entry_research_report.py` reads SQLite in read-only mode and reports
+  price markouts at 15/60/180/300 seconds plus single-filter comparisons.
+  Unknown same-bucket Delta and missing future bars are explicitly unavailable.
+- 217 tests passed. Remote image built and service restarted after consistent
+  backup `runtime/paper.db.pre-entry-research-20260914`; no open position or
+  active paper order at preflight. The usual post-snapshot warmup applies.
+- See `docs/ENTRY_AUDIT_2026-09-14.md` for baseline evidence limits and
+  `docs/ENTRY_RESEARCH.md` for sampling and interpretation.
+
 ## Release v2.10.0 — live multi-bar level episodes (2026-09-13)
 
 - Proximity is armed from live public trades or book midpoint inside the
