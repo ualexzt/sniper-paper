@@ -16,6 +16,7 @@ from statistics import median
 from typing import Any
 
 from .bybit_public import BybitPublicClient
+from .telegram import TelegramAlerts, near_message, signal_message
 from .entry_research import observations as entry_observations
 from .levels import DIGASH_LEVEL_TIMEFRAMES, DIGASH_LEVEL_VERSION, Level, LevelSide
 from .liquidity import LiquidityImpact, calculate_liquidity_impact
@@ -91,6 +92,7 @@ class SymbolState:
 class PaperApp:
     def __init__(self, journal: Journal, client: BybitPublicClient | None = None) -> None:
         self.journal = journal
+        self.telegram = TelegramAlerts()
         self.client = client or BybitPublicClient()
         orphaned = self.journal.reconcile_orphaned_triggers()
         self.protocol_data = json.loads(V2_PROTOCOL_PATH.read_text(encoding="utf-8"))
@@ -738,6 +740,13 @@ class PaperApp:
         if drain is None:
             return
         for event in drain():
+            if event['event_type'] == 'ARMED':
+                state = self.states.get(str(event['symbol']))
+                if state is not None:
+                    ready = self._readiness(state, int(event['occurred_at_ms']))
+                    if ready['stream_ready'] and ready['gap_free'] and not ready['warmup_remaining_s']:
+                        key = f"near:{event['symbol']}:{event['level_side']}:{event['level_price']}"
+                        self.telegram.enqueue(key, near_message(event), cooldown_s=900)
             self._record_shadow(
                 {
                     "diagnostic_id": event["event_id"],
@@ -1206,6 +1215,11 @@ class PaperApp:
                 )
                 return
             self._start_signal_path(state, signal, price, now_ms)
+            if target is not None:
+                self.telegram.enqueue(
+                    f"signal:{signal.signal_id}",
+                    signal_message(state.symbol, side, price, target, signal.lane, now_ms),
+                )
             blocker = self.executor.submission_blocker(signal)
             if blocker:
                 self.journal.update_signal_status(signal.signal_id, "MISSED", blocker)
