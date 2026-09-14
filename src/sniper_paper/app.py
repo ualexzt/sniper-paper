@@ -16,6 +16,7 @@ from statistics import median
 from typing import Any
 
 from .bybit_public import BybitPublicClient
+from .entry_research import observations as entry_observations
 from .levels import DIGASH_LEVEL_TIMEFRAMES, DIGASH_LEVEL_VERSION, Level, LevelSide
 from .liquidity import LiquidityImpact, calculate_liquidity_impact
 from .market import Bar, BarBuilder, Book, Trade
@@ -821,6 +822,10 @@ class PaperApp:
         if blocker is None:
             state.last_blocker = None
         levels = list(state.levels)
+        for row in entry_observations(
+            self.strategies[state.symbol], state.symbol, current, orderflow, levels, readiness,
+        ):
+            self._record_shadow({**row, "protocol_hash": self.protocol_hash})
         decisions = self.strategies[state.symbol].evaluate(
             symbol=state.symbol,
             now_ms=now_ms,
