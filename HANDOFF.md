@@ -1,5 +1,16 @@
 # sniper-paper operational handoff
 
+## Telegram alerts — 2026-09-14
+
+- Code `0f4b4e2`: outbound proximity and confirmed entry notifications,
+  Ukrainian messages, Kyiv timestamps, persistent duplicate suppression.
+- Private configuration resides only in server `runtime/telegram.json` (0600).
+  See `docs/TELEGRAM.md`. Never print credentials or commit the private file.
+- Telegram sendMessage test returned HTTP 200 / ok=true. Remote image rebuilt
+  and container restarted. Focused notification/app tests: 27 passed.
+- Signals are notified before paper submission checks, independent of fills.
+  Proximity notifications wait for continuous data and post-snapshot warmup.
+
 ## Entry research instrumentation — 2026-09-14
 
 - Code `cd8dab3`: per-episode/per-15s evidence for both breakout and reclaim,
